@@ -17,7 +17,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "polly/CodeGen/BlockGenerators.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/ScopInfo.h"
 #include "polly/Options.h"
@@ -154,13 +153,8 @@ __isl_give isl_pw_aff *SCEVAffinator::visitConstant(const SCEVConstant *Expr) {
   v = isl_valFromAPInt(Ctx, Value->getValue(), /* isSigned */ true);
 
   isl_space *Space = isl_space_set_alloc(Ctx, 0, NbLoopSpaces);
-  isl_local_space *ls = isl_local_space_from_space(isl_space_copy(Space));
-  isl_aff *Affine = isl_aff_zero_on_domain(ls);
-  isl_set *Domain = isl_set_universe(Space);
-
-  Affine = isl_aff_add_constant_val(Affine, v);
-
-  return isl_pw_aff_alloc(Domain, Affine);
+  isl_local_space *ls = isl_local_space_from_space(Space);
+  return isl_pw_aff_from_aff(isl_aff_val_on_domain(ls, v));
 }
 
 __isl_give isl_pw_aff *
@@ -723,13 +717,15 @@ void ScopStmt::buildScattering(SmallVectorImpl<unsigned> &Scatter) {
   Scattering = isl_map_align_params(Scattering, Parent.getParamSpace());
 }
 
-void ScopStmt::buildAccesses(TempScop &tempScop, const Region &CurRegion) {
+void ScopStmt::buildAccesses(TempScop &tempScop) {
   for (const auto &AccessPair : *tempScop.getAccessFunctions(BB)) {
     const IRAccess &Access = AccessPair.first;
     Instruction *AccessInst = AccessPair.second;
 
-    const ScopArrayInfo *SAI =
-        getParent()->getOrCreateScopArrayInfo(Access, AccessInst);
+    Type *AccessType = getAccessInstType(AccessInst)->getPointerTo();
+    const ScopArrayInfo *SAI = getParent()->getOrCreateScopArrayInfo(
+        Access.getBase(), AccessType, Access.Sizes);
+
     MemAccs.push_back(new MemoryAccess(Access, AccessInst, this, SAI));
 
     // We do not track locations for scalar memory accesses at the moment.
@@ -788,6 +784,7 @@ __isl_give isl_set *ScopStmt::addLoopBoundsToDomain(__isl_take isl_set *Domain,
   Space = isl_set_get_space(Domain);
   LocalSpace = isl_local_space_from_space(Space);
 
+  ScalarEvolution *SE = getParent()->getSE();
   for (int i = 0, e = getNumIterators(); i != e; ++i) {
     isl_aff *Zero = isl_aff_zero_on_domain(isl_local_space_copy(LocalSpace));
     isl_pw_aff *IV =
@@ -799,7 +796,7 @@ __isl_give isl_set *ScopStmt::addLoopBoundsToDomain(__isl_take isl_set *Domain,
 
     // IV <= LatchExecutions.
     const Loop *L = getLoopForDimension(i);
-    const SCEV *LatchExecutions = tempScop.getLoopBound(L);
+    const SCEV *LatchExecutions = SE->getBackedgeTakenCount(L);
     isl_pw_aff *UpperBound = SCEVAffinator::getPwAff(this, LatchExecutions);
     isl_set *UpperBoundSet = isl_pw_aff_le_set(IV, UpperBound);
     Domain = isl_set_intersect(Domain, UpperBoundSet);
@@ -849,26 +846,76 @@ __isl_give isl_set *ScopStmt::buildDomain(TempScop &tempScop,
   return Domain;
 }
 
+void ScopStmt::deriveAssumptionsFromGEP(GetElementPtrInst *GEP) {
+  int Dimension = 0;
+  isl_ctx *Ctx = Parent.getIslCtx();
+  isl_local_space *LSpace = isl_local_space_from_space(getDomainSpace());
+  Type *Ty = GEP->getPointerOperandType();
+  ScalarEvolution &SE = *Parent.getSE();
+
+  if (auto *PtrTy = dyn_cast<PointerType>(Ty)) {
+    Dimension = 1;
+    Ty = PtrTy->getElementType();
+  }
+
+  while (auto ArrayTy = dyn_cast<ArrayType>(Ty)) {
+    unsigned int Operand = 1 + Dimension;
+
+    if (GEP->getNumOperands() <= Operand)
+      break;
+
+    const SCEV *Expr = SE.getSCEV(GEP->getOperand(Operand));
+
+    if (isAffineExpr(&Parent.getRegion(), Expr, SE)) {
+      isl_pw_aff *AccessOffset = SCEVAffinator::getPwAff(this, Expr);
+      AccessOffset =
+          isl_pw_aff_set_tuple_id(AccessOffset, isl_dim_in, getDomainId());
+
+      isl_pw_aff *DimSize = isl_pw_aff_from_aff(isl_aff_val_on_domain(
+          isl_local_space_copy(LSpace),
+          isl_val_int_from_si(Ctx, ArrayTy->getNumElements())));
+
+      isl_set *OutOfBound = isl_pw_aff_ge_set(AccessOffset, DimSize);
+      OutOfBound = isl_set_intersect(getDomain(), OutOfBound);
+      OutOfBound = isl_set_params(OutOfBound);
+      isl_set *InBound = isl_set_complement(OutOfBound);
+      isl_set *Executed = isl_set_params(getDomain());
+
+      // A => B == !A or B
+      isl_set *InBoundIfExecuted =
+          isl_set_union(isl_set_complement(Executed), InBound);
+
+      Parent.addAssumption(InBoundIfExecuted);
+    }
+
+    Dimension += 1;
+    Ty = ArrayTy->getElementType();
+  }
+
+  isl_local_space_free(LSpace);
+}
+
+void ScopStmt::deriveAssumptions() {
+  for (Instruction &Inst : *BB)
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&Inst))
+      deriveAssumptionsFromGEP(GEP);
+}
+
 ScopStmt::ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion,
                    BasicBlock &bb, SmallVectorImpl<Loop *> &Nest,
                    SmallVectorImpl<unsigned> &Scatter)
-    : Parent(parent), BB(&bb), IVS(Nest.size()), NestLoops(Nest.size()) {
+    : Parent(parent), BB(&bb), NestLoops(Nest.size()) {
   // Setup the induction variables.
-  for (unsigned i = 0, e = Nest.size(); i < e; ++i) {
-    if (!SCEVCodegen) {
-      PHINode *PN = Nest[i]->getCanonicalInductionVariable();
-      assert(PN && "Non canonical IV in Scop!");
-      IVS[i] = PN;
-    }
+  for (unsigned i = 0, e = Nest.size(); i < e; ++i)
     NestLoops[i] = Nest[i];
-  }
 
   BaseName = getIslCompatibleName("Stmt_", &bb, "");
 
   Domain = buildDomain(tempScop, CurRegion);
   buildScattering(Scatter);
-  buildAccesses(tempScop, CurRegion);
+  buildAccesses(tempScop);
   checkForReductions();
+  deriveAssumptions();
 }
 
 /// @brief Collect loads which might form a reduction chain with @p StoreMA
@@ -1021,11 +1068,6 @@ unsigned ScopStmt::getNumScattering() const {
 }
 
 const char *ScopStmt::getBaseName() const { return BaseName.c_str(); }
-
-const PHINode *
-ScopStmt::getInductionVariableForDimension(unsigned Dimension) const {
-  return IVS[Dimension];
-}
 
 const Loop *ScopStmt::getLoopForDimension(unsigned Dimension) const {
   return NestLoops[Dimension];
@@ -1416,10 +1458,30 @@ bool Scop::buildAliasGroups(AliasAnalysis &AA) {
   return Valid;
 }
 
+static unsigned getMaxLoopDepthInRegion(const Region &R, LoopInfo &LI) {
+  unsigned MinLD = INT_MAX, MaxLD = 0;
+  for (BasicBlock *BB : R.blocks()) {
+    if (Loop *L = LI.getLoopFor(BB)) {
+      unsigned LD = L->getLoopDepth();
+      MinLD = std::min(MinLD, LD);
+      MaxLD = std::max(MaxLD, LD);
+    }
+  }
+
+  // Handle the case that there is no loop in the SCoP first.
+  if (MaxLD == 0)
+    return 1;
+
+  assert(MinLD >= 1 && "Minimal loop depth should be at least one");
+  assert(MaxLD >= MinLD &&
+         "Maximal loop depth was smaller than mininaml loop depth?");
+  return MaxLD - MinLD + 1;
+}
+
 Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
            isl_ctx *Context)
     : SE(&ScalarEvolution), R(tempScop.getMaxRegion()),
-      MaxLoopDepth(tempScop.getMaxLoopDepth()) {
+      MaxLoopDepth(getMaxLoopDepthInRegion(tempScop.getMaxRegion(), LI)) {
   IslCtx = Context;
   buildContext();
 
@@ -1461,14 +1523,12 @@ Scop::~Scop() {
   }
 }
 
-const ScopArrayInfo *Scop::getOrCreateScopArrayInfo(const IRAccess &Access,
-                                                    Instruction *AccessInst) {
-  Value *BasePtr = Access.getBase();
+const ScopArrayInfo *
+Scop::getOrCreateScopArrayInfo(Value *BasePtr, Type *AccessType,
+                               const SmallVector<const SCEV *, 4> &Sizes) {
   const ScopArrayInfo *&SAI = ScopArrayInfoMap[BasePtr];
-  if (!SAI) {
-    Type *AccessType = getPointerOperand(*AccessInst)->getType();
-    SAI = new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Access.Sizes);
-  }
+  if (!SAI)
+    SAI = new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Sizes);
   return SAI;
 }
 
@@ -1514,6 +1574,7 @@ __isl_give isl_set *Scop::getAssumedContext() const {
 
 void Scop::addAssumption(__isl_take isl_set *Set) {
   AssumedContext = isl_set_intersect(AssumedContext, Set);
+  AssumedContext = isl_set_coalesce(AssumedContext);
 }
 
 void Scop::printContext(raw_ostream &OS) const {
@@ -1722,8 +1783,12 @@ void Scop::buildScop(TempScop &tempScop, const Region &CurRegion,
       if (isTrivialBB(BB, tempScop))
         continue;
 
-      Stmts.push_back(
-          new ScopStmt(*this, tempScop, CurRegion, *BB, NestLoops, Scatter));
+      ScopStmt *Stmt =
+          new ScopStmt(*this, tempScop, CurRegion, *BB, NestLoops, Scatter);
+
+      // Insert all statements into the statement map and the statement vector.
+      StmtMap[BB] = Stmt;
+      Stmts.push_back(Stmt);
 
       // Increasing the Scattering function is OK for the moment, because
       // we are using a depth first iterator and the program is well structured.
@@ -1737,6 +1802,13 @@ void Scop::buildScop(TempScop &tempScop, const Region &CurRegion,
   Scatter[loopDepth] = 0;
   NestLoops.pop_back();
   ++Scatter[loopDepth - 1];
+}
+
+ScopStmt *Scop::getStmtForBasicBlock(BasicBlock *BB) const {
+  const auto &StmtMapIt = StmtMap.find(BB);
+  if (StmtMapIt == StmtMap.end())
+    return nullptr;
+  return StmtMapIt->second;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1768,28 +1840,29 @@ bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
 
   // This region is no Scop.
   if (!tempScop) {
-    scop = 0;
+    scop = nullptr;
     return false;
   }
 
-  // Statistics.
-  ++ScopFound;
-  if (tempScop->getMaxLoopDepth() > 0)
-    ++RichScopFound;
-
   scop = new Scop(*tempScop, LI, SE, ctx);
 
-  if (!PollyUseRuntimeAliasChecks)
+  if (!PollyUseRuntimeAliasChecks) {
+    // Statistics.
+    ++ScopFound;
+    if (scop->getMaxLoopDepth() > 0)
+      ++RichScopFound;
     return false;
+  }
 
   // If a problem occurs while building the alias groups we need to delete
   // this SCoP and pretend it wasn't valid in the first place.
-  if (scop->buildAliasGroups(AA))
+  if (scop->buildAliasGroups(AA)) {
+    // Statistics.
+    ++ScopFound;
+    if (scop->getMaxLoopDepth() > 0)
+      ++RichScopFound;
     return false;
-
-  --ScopFound;
-  if (tempScop->getMaxLoopDepth() > 0)
-    --RichScopFound;
+  }
 
   DEBUG(dbgs()
         << "\n\nNOTE: Run time checks for " << scop->getNameStr()

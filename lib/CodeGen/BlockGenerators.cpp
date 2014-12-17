@@ -39,30 +39,17 @@ static cl::opt<bool> Aligned("enable-polly-aligned",
                              cl::Hidden, cl::init(false), cl::ZeroOrMore,
                              cl::cat(PollyCategory));
 
-static cl::opt<bool, true>
-    SCEVCodegenF("polly-codegen-scev",
-                 cl::desc("Use SCEV based code generation."), cl::Hidden,
-                 cl::location(SCEVCodegen), cl::init(false), cl::ZeroOrMore,
-                 cl::cat(PollyCategory));
-
-bool polly::SCEVCodegen;
-
 bool polly::canSynthesize(const Instruction *I, const llvm::LoopInfo *LI,
                           ScalarEvolution *SE, const Region *R) {
-  if (SCEVCodegen) {
-    if (!I || !SE->isSCEVable(I->getType()))
-      return false;
-
-    if (const SCEV *Scev = SE->getSCEV(const_cast<Instruction *>(I)))
-      if (!isa<SCEVCouldNotCompute>(Scev))
-        if (!hasScalarDepsInsideRegion(Scev, R))
-          return true;
-
+  if (!I || !SE->isSCEVable(I->getType()))
     return false;
-  }
 
-  Loop *L = LI->getLoopFor(I->getParent());
-  return L && I == L->getCanonicalInductionVariable() && R->contains(L);
+  if (const SCEV *Scev = SE->getSCEV(const_cast<Instruction *>(I)))
+    if (!isa<SCEVCouldNotCompute>(Scev))
+      if (!hasScalarDepsInsideRegion(Scev, R))
+        return true;
+
+  return false;
 }
 
 BlockGenerator::BlockGenerator(PollyIRBuilder &B, ScopStmt &Stmt, Pass *P,
@@ -72,8 +59,9 @@ BlockGenerator::BlockGenerator(PollyIRBuilder &B, ScopStmt &Stmt, Pass *P,
     : Builder(B), Statement(Stmt), P(P), LI(LI), SE(SE), Build(Build),
       ExprBuilder(ExprBuilder) {}
 
-Value *BlockGenerator::lookupAvailableValue(const Value *Old, ValueMapT &BBMap,
-                                            ValueMapT &GlobalMap) const {
+Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
+                                   ValueMapT &GlobalMap, LoopToScevMapT &LTS,
+                                   Loop *L) const {
   // We assume constants never change.
   // This avoids map lookups for many calls to this function.
   if (isa<Constant>(Old))
@@ -87,28 +75,10 @@ Value *BlockGenerator::lookupAvailableValue(const Value *Old, ValueMapT &BBMap,
     return New;
   }
 
-  // Or it is probably a scop-constant value defined as global, function
-  // parameter or an instruction not within the scop.
-  if (isa<GlobalValue>(Old) || isa<Argument>(Old))
-    return const_cast<Value *>(Old);
-
-  if (const Instruction *Inst = dyn_cast<Instruction>(Old))
-    if (!Statement.getParent()->getRegion().contains(Inst->getParent()))
-      return const_cast<Value *>(Old);
-
   if (Value *New = BBMap.lookup(Old))
     return New;
 
-  return nullptr;
-}
-
-Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
-                                   ValueMapT &GlobalMap, LoopToScevMapT &LTS,
-                                   Loop *L) {
-  if (Value *New = lookupAvailableValue(Old, BBMap, GlobalMap))
-    return New;
-
-  if (SCEVCodegen && SE.isSCEVable(Old->getType()))
+  if (SE.isSCEVable(Old->getType()))
     if (const SCEV *Scev = SE.getSCEVAtScope(const_cast<Value *>(Old), L)) {
       if (!isa<SCEVCouldNotCompute>(Scev)) {
         const SCEV *NewScev = apply(Scev, LTS, SE);
@@ -125,8 +95,16 @@ Value *BlockGenerator::getNewValue(const Value *Old, ValueMapT &BBMap,
       }
     }
 
-  // Now the scalar dependence is neither available nor SCEVCodegenable, this
-  // should never happen in the current code generator.
+  // A scop-constant value defined by a global or a function parameter.
+  if (isa<GlobalValue>(Old) || isa<Argument>(Old))
+    return const_cast<Value *>(Old);
+
+  // A scop-constant value defined by an instruction executed outside the scop.
+  if (const Instruction *Inst = dyn_cast<Instruction>(Old))
+    if (!Statement.getParent()->getRegion().contains(Inst->getParent()))
+      return const_cast<Value *>(Old);
+
+  // The scalar dependence is neither available nor SCEVCodegenable.
   llvm_unreachable("Unexpected scalar dependence in region!");
   return nullptr;
 }
