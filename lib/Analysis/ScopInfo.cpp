@@ -98,6 +98,7 @@ private:
   __isl_give isl_pw_aff *visitSMaxExpr(const SCEVSMaxExpr *Expr);
   __isl_give isl_pw_aff *visitUMaxExpr(const SCEVUMaxExpr *Expr);
   __isl_give isl_pw_aff *visitUnknown(const SCEVUnknown *Expr);
+  __isl_give isl_pw_aff *visitSDivInstruction(Instruction *SDiv);
 
   friend struct SCEVVisitor<SCEVAffinator, isl_pw_aff *>;
 };
@@ -262,8 +263,34 @@ __isl_give isl_pw_aff *SCEVAffinator::visitUMaxExpr(const SCEVUMaxExpr *Expr) {
   llvm_unreachable("SCEVUMaxExpr not yet supported");
 }
 
+__isl_give isl_pw_aff *SCEVAffinator::visitSDivInstruction(Instruction *SDiv) {
+  assert(SDiv->getOpcode() == Instruction::SDiv && "Assumed SDiv instruction!");
+  auto *SE = S->getSE();
+
+  auto *Divisor = SDiv->getOperand(1);
+  auto *DivisorSCEV = SE->getSCEV(Divisor);
+  auto *DivisorPWA = visit(DivisorSCEV);
+  assert(isa<ConstantInt>(Divisor) &&
+         "SDiv is no parameter but has a non-constant RHS.");
+
+  auto *Dividend = SDiv->getOperand(0);
+  auto *DividendSCEV = SE->getSCEV(Dividend);
+  auto *DividendPWA = visit(DividendSCEV);
+  return isl_pw_aff_tdiv_q(DividendPWA, DivisorPWA);
+}
+
 __isl_give isl_pw_aff *SCEVAffinator::visitUnknown(const SCEVUnknown *Expr) {
-  llvm_unreachable("Unknowns are always parameters");
+  if (Instruction *I = dyn_cast<Instruction>(Expr->getValue())) {
+    switch (I->getOpcode()) {
+    case Instruction::SDiv:
+      return visitSDivInstruction(I);
+    default:
+      break; // Fall through.
+    }
+  }
+
+  llvm_unreachable(
+      "Unknowns SCEV was neither parameter nor a valid instruction.");
 }
 
 int SCEVAffinator::getLoopDepth(const Loop *L) {
@@ -570,7 +597,8 @@ void MemoryAccess::print(raw_ostream &OS) const {
     OS.indent(12) << "MayWriteAccess :=\t";
     break;
   }
-  OS << "[Reduction Type: " << getReductionType() << "]\n";
+  OS << "[Reduction Type: " << getReductionType() << "] ";
+  OS << "[Scalar: " << isScalar() << "]\n";
   OS.indent(16) << getOriginalAccessRelationStr() << ";\n";
 }
 
@@ -696,7 +724,6 @@ void ScopStmt::buildScattering(SmallVectorImpl<unsigned> &Scatter) {
   unsigned NbScatteringDims = Parent.getMaxLoopDepth() * 2 + 1;
 
   isl_space *Space = isl_space_set_alloc(getIslCtx(), 0, NbScatteringDims);
-  Space = isl_space_set_tuple_name(Space, isl_dim_out, "scattering");
 
   Scattering = isl_map_from_domain_and_range(isl_set_universe(getDomainSpace()),
                                              isl_set_universe(Space));
@@ -767,10 +794,13 @@ __isl_give isl_set *ScopStmt::buildConditionSet(const Comparison &Comp) {
   case ICmpInst::ICMP_SGE:
     return isl_pw_aff_ge_set(L, R);
   case ICmpInst::ICMP_ULT:
+    return isl_pw_aff_lt_set(L, R);
   case ICmpInst::ICMP_UGT:
+    return isl_pw_aff_gt_set(L, R);
   case ICmpInst::ICMP_ULE:
+    return isl_pw_aff_le_set(L, R);
   case ICmpInst::ICMP_UGE:
-    llvm_unreachable("Unsigned comparisons not yet supported");
+    return isl_pw_aff_ge_set(L, R);
   default:
     llvm_unreachable("Non integer predicate not supported");
   }
@@ -904,7 +934,7 @@ void ScopStmt::deriveAssumptions() {
 ScopStmt::ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion,
                    BasicBlock &bb, SmallVectorImpl<Loop *> &Nest,
                    SmallVectorImpl<unsigned> &Scatter)
-    : Parent(parent), BB(&bb), NestLoops(Nest.size()) {
+    : Parent(parent), BB(&bb), Build(nullptr), NestLoops(Nest.size()) {
   // Setup the induction variables.
   for (unsigned i = 0, e = Nest.size(); i < e; ++i)
     NestLoops[i] = Nest[i];
@@ -1168,14 +1198,18 @@ void Scop::addParameterBounds() {
     isl_id *Id;
     const SCEV *Scev;
     const IntegerType *T;
+    int Width;
 
     Id = isl_set_get_dim_id(Context, isl_dim_param, i);
     Scev = (const SCEV *)isl_id_get_user(Id);
-    T = dyn_cast<IntegerType>(Scev->getType());
     isl_id_free(Id);
 
-    assert(T && "Not an integer type");
-    int Width = T->getBitWidth();
+    T = dyn_cast<IntegerType>(Scev->getType());
+
+    if (!T)
+      continue;
+
+    Width = T->getBitWidth();
 
     V = isl_val_int_from_si(IslCtx, Width - 1);
     V = isl_val_2exp(V);
@@ -1462,6 +1496,8 @@ static unsigned getMaxLoopDepthInRegion(const Region &R, LoopInfo &LI) {
   unsigned MinLD = INT_MAX, MaxLD = 0;
   for (BasicBlock *BB : R.blocks()) {
     if (Loop *L = LI.getLoopFor(BB)) {
+      if (!R.contains(L))
+        continue;
       unsigned LD = L->getLoopDepth();
       MinLD = std::min(MinLD, LD);
       MaxLD = std::max(MaxLD, LD);
@@ -1478,9 +1514,43 @@ static unsigned getMaxLoopDepthInRegion(const Region &R, LoopInfo &LI) {
   return MaxLD - MinLD + 1;
 }
 
+void Scop::dropConstantScheduleDims() {
+  isl_union_map *FullSchedule = getSchedule();
+
+  if (isl_union_map_n_map(FullSchedule) == 0) {
+    isl_union_map_free(FullSchedule);
+    return;
+  }
+
+  isl_set *ScheduleSpace =
+      isl_set_from_union_set(isl_union_map_range(FullSchedule));
+  isl_map *DropDimMap = isl_set_identity(isl_set_copy(ScheduleSpace));
+
+  int NumDimsDropped = 0;
+  for (unsigned i = 0; i < isl_set_dim(ScheduleSpace, isl_dim_set); i++)
+    if (i % 2 == 0) {
+      isl_val *FixedVal =
+          isl_set_plain_get_val_if_fixed(ScheduleSpace, isl_dim_set, i);
+      if (isl_val_is_int(FixedVal)) {
+        DropDimMap =
+            isl_map_project_out(DropDimMap, isl_dim_out, i - NumDimsDropped, 1);
+        NumDimsDropped++;
+      }
+      isl_val_free(FixedVal);
+    }
+
+  for (auto *S : *this) {
+    isl_map *Schedule = S->getScattering();
+    Schedule = isl_map_apply_range(Schedule, isl_map_copy(DropDimMap));
+    S->setScattering(Schedule);
+  }
+  isl_set_free(ScheduleSpace);
+  isl_map_free(DropDimMap);
+}
+
 Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
            isl_ctx *Context)
-    : SE(&ScalarEvolution), R(tempScop.getMaxRegion()),
+    : SE(&ScalarEvolution), R(tempScop.getMaxRegion()), IsOptimized(false),
       MaxLoopDepth(getMaxLoopDepthInRegion(tempScop.getMaxRegion(), LI)) {
   IslCtx = Context;
   buildContext();
@@ -1497,6 +1567,7 @@ Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
   realignParams();
   addParameterBounds();
   simplifyAssumedContext();
+  dropConstantScheduleDims();
 
   assert(NestLoops.empty() && "NestLoops not empty at top level!");
 }
@@ -1628,6 +1699,7 @@ void Scop::print(raw_ostream &OS) const {
   OS.indent(4) << "Function: " << getRegion().getEntry()->getParent()->getName()
                << "\n";
   OS.indent(4) << "Region: " << getNameStr() << "\n";
+  OS.indent(4) << "Max Loop Depth:  " << getMaxLoopDepth() << "\n";
   printContext(OS.indent(4));
   printAliasAssumptions(OS);
   printStatements(OS.indent(4));
@@ -1823,7 +1895,7 @@ ScopInfo::~ScopInfo() {
 }
 
 void ScopInfo::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<LoopInfo>();
+  AU.addRequired<LoopInfoWrapperPass>();
   AU.addRequired<RegionInfoPass>();
   AU.addRequired<ScalarEvolution>();
   AU.addRequired<TempScopInfo>();
@@ -1832,7 +1904,7 @@ void ScopInfo::getAnalysisUsage(AnalysisUsage &AU) const {
 }
 
 bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
-  LoopInfo &LI = getAnalysis<LoopInfo>();
+  LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   AliasAnalysis &AA = getAnalysis<AliasAnalysis>();
   ScalarEvolution &SE = getAnalysis<ScalarEvolution>();
 
@@ -1885,7 +1957,7 @@ INITIALIZE_PASS_BEGIN(ScopInfo, "polly-scops",
                       "Polly - Create polyhedral description of Scops", false,
                       false);
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis);
-INITIALIZE_PASS_DEPENDENCY(LoopInfo);
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
 INITIALIZE_PASS_DEPENDENCY(TempScopInfo);

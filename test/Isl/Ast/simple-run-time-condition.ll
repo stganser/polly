@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-ast -analyze -polly-delinearize < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-ast -analyze -polly-no-early-exit -polly-delinearize < %s | FileCheck %s
 target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-s0:64:64-f80:128:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"
 
@@ -26,12 +26,12 @@ target triple = "x86_64-unknown-linux-gnu"
 
 ; CHECK:     if (o >= 1) {
 ; CHECK:       for (int c1 = 0; c1 < n; c1 += 1)
-; CHECK:         for (int c3 = 0; c3 < m; c3 += 1)
-; CHECK:           Stmt_for_j(c1, c3);
+; CHECK:         for (int c2 = 0; c2 < m; c2 += 1)
+; CHECK:           Stmt_for_j(c1, c2);
 ; CHECK:     } else
 ; CHECK:       for (int c1 = 0; c1 < n; c1 += 1)
-; CHECK:         for (int c3 = 0; c3 < m; c3 += 1)
-; CHECK:           Stmt_for_j_1(c1, c3);
+; CHECK:         for (int c2 = 0; c2 < m; c2 += 1)
+; CHECK:           Stmt_for_j_1(c1, c2);
 
 ; CHECK: else
 ; CHECK:     {  /* original code */ }

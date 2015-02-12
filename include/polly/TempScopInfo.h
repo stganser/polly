@@ -55,6 +55,11 @@ public:
   SmallVector<const SCEV *, 4> Subscripts, Sizes;
 
   explicit IRAccess(TypeKind Type, Value *BaseAddress, const SCEV *Offset,
+                    unsigned elemBytes, bool Affine)
+      : BaseAddress(BaseAddress), Offset(Offset), ElemBytes(elemBytes),
+        Type(Type), IsAffine(Affine) {}
+
+  explicit IRAccess(TypeKind Type, Value *BaseAddress, const SCEV *Offset,
                     unsigned elemBytes, bool Affine,
                     SmallVector<const SCEV *, 4> Subscripts,
                     SmallVector<const SCEV *, 4> Sizes)
@@ -269,6 +274,13 @@ class TempScopInfo : public FunctionPass {
   /// @return     True if the Instruction is used in other BB and a scalar write
   ///             Access is required.
   bool buildScalarDependences(Instruction *Inst, Region *R);
+
+  /// @brief Create IRAccesses for the given PHI node in the given region.
+  ///
+  /// @param PHI       The PHI node to be handled
+  /// @param R         The SCoP region
+  /// @param Functions The access functions of the current BB
+  void buildPHIAccesses(PHINode *PHI, Region &R, AccFuncSetType &Functions);
 
   void buildAccessFunctions(Region &RefRegion, BasicBlock &BB);
 

@@ -46,6 +46,7 @@ struct isl_set;
 struct isl_union_set;
 struct isl_union_map;
 struct isl_space;
+struct isl_ast_build;
 struct isl_constraint;
 struct isl_pw_multi_aff;
 
@@ -426,6 +427,9 @@ class ScopStmt {
   /// The BasicBlock represented by this statement.
   BasicBlock *BB;
 
+  /// @brief The isl AST build for the new generated AST.
+  isl_ast_build *Build;
+
   std::vector<Loop *> NestLoops;
 
   std::string BaseName;
@@ -559,6 +563,12 @@ public:
 
   const char *getBaseName() const;
 
+  /// @brief Set the isl AST build.
+  void setAstBuild(__isl_keep isl_ast_build *B) { Build = B; }
+
+  /// @brief Get the isl AST build.
+  __isl_keep isl_ast_build *getAstBuild() const { return Build; }
+
   /// @brief Restrict the domain of the statement.
   ///
   /// @param NewDomain The new statement domain.
@@ -625,6 +635,9 @@ private:
 
   /// The underlying Region.
   Region &R;
+
+  /// Flag to indicate that the scheduler actually optimized the SCoP.
+  bool IsOptimized;
 
   /// Max loop depth.
   unsigned MaxLoopDepth;
@@ -781,6 +794,12 @@ public:
     return maxScatterDim;
   }
 
+  /// @brief Mark the SCoP as optimized by the scheduler.
+  void markAsOptimized() { IsOptimized = true; }
+
+  /// @brief Check if the SCoP has been optimized by the scheduler.
+  bool isOptimized() const { return IsOptimized; }
+
   /// @brief Get the name of this Scop.
   std::string getNameStr() const;
 
@@ -814,6 +833,13 @@ public:
   ///
   /// @returns True if __no__ error occurred, false otherwise.
   bool buildAliasGroups(AliasAnalysis &AA);
+
+  //// @brief Drop all constant dimensions from statment schedules.
+  ///
+  ///  Schedule dimensions that are constant accross the scop do not carry
+  ///  any information, but would cost compile time due to the increased number
+  ///  of scheduling dimensions. To not pay this cost, we remove them.
+  void dropConstantScheduleDims();
 
   /// @brief Return all alias groups for this SCoP.
   const MinMaxVectorVectorTy &getAliasGroups() const {

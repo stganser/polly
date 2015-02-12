@@ -60,6 +60,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/LLVMContext.h"
@@ -120,6 +121,11 @@ static cl::opt<bool>
                    cl::Hidden, cl::init(false), cl::ZeroOrMore,
                    cl::cat(PollyCategory));
 
+static cl::opt<bool> AllowUnsigned("polly-allow-unsigned",
+                                   cl::desc("Allow unsigned expressions"),
+                                   cl::Hidden, cl::init(false), cl::ZeroOrMore,
+                                   cl::cat(PollyCategory));
+
 static cl::opt<bool, true>
     TrackFailures("polly-detect-track-failures",
                   cl::desc("Track failure strings in detecting scop regions"),
@@ -143,6 +149,13 @@ static cl::opt<bool>
                 cl::Hidden, cl::init(false), cl::ZeroOrMore,
                 cl::cat(PollyCategory));
 
+static cl::opt<bool, true> XPollyModelPHINodes(
+    "polly-model-phi-nodes",
+    cl::desc("Allow PHI nodes in the input [Unsafe with code-generation!]."),
+    cl::location(PollyModelPHINodes), cl::Hidden, cl::ZeroOrMore,
+    cl::init(false), cl::cat(PollyCategory));
+
+bool polly::PollyModelPHINodes = false;
 bool polly::PollyTrackFailures = false;
 bool polly::PollyDelinearize = false;
 StringRef polly::PollySkipFnAttr = "polly.skip.fn";
@@ -292,7 +305,7 @@ bool ScopDetection::isValidCFG(BasicBlock &BB,
     //
     // TODO: This is not sufficient and just hides bugs. However it does pretty
     // well.
-    if (ICmp->isUnsigned())
+    if (ICmp->isUnsigned() && !AllowUnsigned)
       return false;
 
     // Are both operands of the ICmp affine?
@@ -324,7 +337,7 @@ bool ScopDetection::isValidCFG(BasicBlock &BB,
 }
 
 bool ScopDetection::isValidCallInst(CallInst &CI) {
-  if (CI.mayHaveSideEffects() || CI.doesNotReturn())
+  if (CI.doesNotReturn())
     return false;
 
   if (CI.doesNotAccessMemory())
@@ -336,7 +349,29 @@ bool ScopDetection::isValidCallInst(CallInst &CI) {
   if (CalledFunction == 0)
     return false;
 
-  // TODO: Intrinsics.
+  // Check if we can handle the intrinsic call.
+  if (auto *IT = dyn_cast<IntrinsicInst>(&CI)) {
+    switch (IT->getIntrinsicID()) {
+    // Lifetime markers are supported/ignored.
+    case llvm::Intrinsic::lifetime_start:
+    case llvm::Intrinsic::lifetime_end:
+    // Invariant markers are supported/ignored.
+    case llvm::Intrinsic::invariant_start:
+    case llvm::Intrinsic::invariant_end:
+    // Some misc annotations are supported/ignored.
+    case llvm::Intrinsic::var_annotation:
+    case llvm::Intrinsic::ptr_annotation:
+    case llvm::Intrinsic::annotation:
+    case llvm::Intrinsic::donothing:
+    case llvm::Intrinsic::assume:
+    case llvm::Intrinsic::expect:
+      return true;
+    default:
+      // Other intrinsics which may access the memory are not yet supported.
+      break;
+    }
+  }
+
   return false;
 }
 
@@ -457,8 +492,8 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
       if (IsNonAffine) {
         BasePtrHasNonAffine = true;
         if (!AllowNonAffine)
-          invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, AF, Insn,
-                                         BaseValue);
+          invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, Pair.second,
+                                         Insn, BaseValue);
         if (!KeepGoing && !AllowNonAffine)
           return false;
       }
@@ -568,7 +603,7 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
 bool ScopDetection::isValidInstruction(Instruction &Inst,
                                        DetectionContext &Context) const {
   if (PHINode *PN = dyn_cast<PHINode>(&Inst))
-    if (!canSynthesize(PN, LI, SE, &Context.CurRegion)) {
+    if (!PollyModelPHINodes && !canSynthesize(PN, LI, SE, &Context.CurRegion)) {
       return invalid<ReportPhiNodeRefInRegion>(Context, /*Assert=*/true, &Inst);
     }
 
@@ -884,7 +919,7 @@ void ScopDetection::emitMissedRemarksForLeaves(const Function &F,
 }
 
 bool ScopDetection::runOnFunction(llvm::Function &F) {
-  LI = &getAnalysis<LoopInfo>();
+  LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   RI = &getAnalysis<RegionInfoPass>().getRegionInfo();
   if (!DetectScopsWithoutLoops && LI->empty())
     return false;
@@ -935,7 +970,7 @@ void polly::ScopDetection::verifyAnalysis() const {
 void ScopDetection::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<DominatorTreeWrapperPass>();
   AU.addRequired<PostDominatorTree>();
-  AU.addRequired<LoopInfo>();
+  AU.addRequired<LoopInfoWrapperPass>();
   AU.addRequired<ScalarEvolution>();
   // We also need AA and RegionInfo when we are verifying analysis.
   AU.addRequiredTransitive<AliasAnalysis>();
@@ -966,7 +1001,7 @@ INITIALIZE_PASS_BEGIN(ScopDetection, "polly-detect",
                       false);
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis);
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);
-INITIALIZE_PASS_DEPENDENCY(LoopInfo);
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(PostDominatorTree);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);

@@ -19,6 +19,7 @@
 
 #include "llvm/PassManager.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/TargetRegistry.h"
@@ -27,7 +28,6 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -561,9 +561,7 @@ static bool createASMAsString(Module *New, const StringRef &Triple,
   // Build up all of the passes that we want to do to the module.
   PassManager PM;
 
-  TargetLibraryInfo *TLI = new TargetLibraryInfo(TheTriple);
-  PM.add(TLI);
-
+  PM.add(new TargetLibraryInfoWrapperPass(TheTriple));
   PM.add(new DataLayoutPass(*Target.getDataLayout()));
   Target.addAnalysisPasses(PM);
 

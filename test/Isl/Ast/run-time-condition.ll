@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -basicaa -polly-ast -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -basicaa -polly-ast -analyze -polly-no-early-exit < %s | FileCheck %s
 
 ; for (i = 0; i < 1024; i++)
 ;   A[i] = B[i];
@@ -29,8 +29,8 @@ for.end:                                          ; preds = %for.cond
 }
 
 ; CHECK: if (1)
-; CHECK:     for (int c1 = 0; c1 <= 1023; c1 += 1)
-; CHECK:       Stmt_for_body(c1);
+; CHECK:     for (int c0 = 0; c0 <= 1023; c0 += 1)
+; CHECK:       Stmt_for_body(c0);
 ; CHECK: else
 ; CHECK:     {  /* original code */ }
 

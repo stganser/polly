@@ -64,7 +64,8 @@ public:
                  DominatorTree &DT, Scop &S)
       : S(S), Builder(Builder), Annotator(Annotator),
         Rewriter(new SCEVExpander(SE, "polly")),
-        ExprBuilder(Builder, IDToValue, *Rewriter), P(P), DL(DL), LI(LI),
+        ExprBuilder(Builder, IDToValue, *Rewriter),
+        BlockGen(Builder, P, LI, SE, &ExprBuilder), P(P), DL(DL), LI(LI),
         SE(SE), DT(DT) {}
 
   ~IslNodeBuilder() { delete Rewriter; }
@@ -82,6 +83,7 @@ private:
   SCEVExpander *Rewriter;
 
   IslExprBuilder ExprBuilder;
+  BlockGenerator BlockGen;
   Pass *P;
   const DataLayout &DL;
   LoopInfo &LI;
@@ -245,10 +247,11 @@ IslNodeBuilder::getUpperBound(__isl_keep isl_ast_node *For,
 
   Cond = isl_ast_node_for_get_cond(For);
   Iterator = isl_ast_node_for_get_iterator(For);
-  Type = isl_ast_expr_get_op_type(Cond);
-
+  isl_ast_expr_get_type(Cond);
   assert(isl_ast_expr_get_type(Cond) == isl_ast_expr_op &&
          "conditional expression is not an atomic upper bound");
+
+  Type = isl_ast_expr_get_op_type(Cond);
 
   switch (Type) {
   case isl_ast_op_le:
@@ -397,6 +400,7 @@ void IslNodeBuilder::createUserVector(__isl_take isl_ast_node *User,
   isl_id *Id = isl_ast_expr_get_id(StmtExpr);
   isl_ast_expr_free(StmtExpr);
   ScopStmt *Stmt = (ScopStmt *)isl_id_get_user(Id);
+  Stmt->setAstBuild(IslAstInfo::getBuild(User));
   VectorValueMapT VectorMap(IVS.size());
   std::vector<LoopToScevMapT> VLTS(IVS.size());
 
@@ -405,8 +409,7 @@ void IslNodeBuilder::createUserVector(__isl_take isl_ast_node *User,
   isl_map *S = isl_map_from_union_map(Schedule);
 
   createSubstitutionsVector(Expr, Stmt, VectorMap, VLTS, IVS, IteratorID);
-  VectorBlockGenerator::generate(Builder, *Stmt, VectorMap, VLTS, S, P, LI, SE,
-                                 IslAstInfo::getBuild(User), &ExprBuilder);
+  VectorBlockGenerator::generate(BlockGen, *Stmt, VectorMap, VLTS, S);
 
   isl_map_free(S);
   isl_id_free(Id);
@@ -697,9 +700,9 @@ void IslNodeBuilder::createIf(__isl_take isl_ast_node *If) {
   LLVMContext &Context = F->getContext();
 
   BasicBlock *CondBB =
-      SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), P);
+      SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), &DT, &LI);
   CondBB->setName("polly.cond");
-  BasicBlock *MergeBB = SplitBlock(CondBB, CondBB->begin(), P);
+  BasicBlock *MergeBB = SplitBlock(CondBB, CondBB->begin(), &DT, &LI);
   MergeBB->setName("polly.merge");
   BasicBlock *ThenBB = BasicBlock::Create(Context, "polly.then", F);
   BasicBlock *ElseBB = BasicBlock::Create(Context, "polly.else", F);
@@ -710,8 +713,8 @@ void IslNodeBuilder::createIf(__isl_take isl_ast_node *If) {
 
   Loop *L = LI.getLoopFor(CondBB);
   if (L) {
-    L->addBasicBlockToLoop(ThenBB, LI.getBase());
-    L->addBasicBlockToLoop(ElseBB, LI.getBase());
+    L->addBasicBlockToLoop(ThenBB, LI);
+    L->addBasicBlockToLoop(ElseBB, LI);
   }
 
   CondBB->getTerminator()->eraseFromParent();
@@ -794,10 +797,10 @@ void IslNodeBuilder::createUser(__isl_take isl_ast_node *User) {
   LTS.insert(OutsideLoopIterations.begin(), OutsideLoopIterations.end());
 
   Stmt = (ScopStmt *)isl_id_get_user(Id);
+  Stmt->setAstBuild(IslAstInfo::getBuild(User));
 
   createSubstitutions(Expr, Stmt, VMap, LTS);
-  BlockGenerator::generate(Builder, *Stmt, VMap, LTS, P, LI, SE,
-                           IslAstInfo::getBuild(User), &ExprBuilder);
+  BlockGen.copyBB(*Stmt, VMap, LTS);
 
   isl_ast_node_free(User);
   isl_id_free(Id);
@@ -871,8 +874,7 @@ void IslNodeBuilder::addParameters(__isl_take isl_set *Context) {
 
 Value *IslNodeBuilder::generateSCEV(const SCEV *Expr) {
   Instruction *InsertLocation = --(Builder.GetInsertBlock()->end());
-  return Rewriter->expandCodeFor(Expr, cast<IntegerType>(Expr->getType()),
-                                 InsertLocation);
+  return Rewriter->expandCodeFor(Expr, Expr->getType(), InsertLocation);
 }
 
 namespace {
@@ -912,8 +914,14 @@ public:
   }
 
   bool runOnScop(Scop &S) {
-    LI = &getAnalysis<LoopInfo>();
     AI = &getAnalysis<IslAstInfo>();
+
+    // Check if we created an isl_ast root node, otherwise exit.
+    isl_ast_node *AstRoot = AI->getAst();
+    if (!AstRoot)
+      return false;
+
+    LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
     DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     SE = &getAnalysis<ScalarEvolution>();
     DL = &getAnalysis<DataLayoutPass>().getDataLayout();
@@ -935,7 +943,7 @@ public:
     BasicBlock *StartBlock = executeScopConditionally(S, this, RTC);
     Builder.SetInsertPoint(StartBlock->begin());
 
-    NodeBuilder.create(AI->getAst());
+    NodeBuilder.create(AstRoot);
     return true;
   }
 
@@ -949,11 +957,11 @@ public:
     AU.addRequired<ScalarEvolution>();
     AU.addRequired<ScopDetection>();
     AU.addRequired<ScopInfo>();
-    AU.addRequired<LoopInfo>();
+    AU.addRequired<LoopInfoWrapperPass>();
 
     AU.addPreserved<Dependences>();
 
-    AU.addPreserved<LoopInfo>();
+    AU.addPreserved<LoopInfoWrapperPass>();
     AU.addPreserved<DominatorTreeWrapperPass>();
     AU.addPreserved<IslAstInfo>();
     AU.addPreserved<ScopDetection>();
@@ -977,7 +985,7 @@ INITIALIZE_PASS_BEGIN(IslCodeGeneration, "polly-codegen-isl",
                       "Polly - Create LLVM-IR from SCoPs", false, false);
 INITIALIZE_PASS_DEPENDENCY(Dependences);
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);
-INITIALIZE_PASS_DEPENDENCY(LoopInfo);
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
 INITIALIZE_PASS_DEPENDENCY(ScopDetection);

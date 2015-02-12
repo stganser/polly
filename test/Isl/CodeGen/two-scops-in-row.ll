@@ -1,12 +1,12 @@
-; RUN: opt %loadPolly -polly-ast -analyze -polly-ignore-aliasing < %s | FileCheck %s 
-; RUN: opt %loadPolly -polly-codegen-isl -polly-ignore-aliasing < %s
+; RUN: opt %loadPolly -polly-no-early-exit -polly-ast -analyze -polly-ignore-aliasing < %s | FileCheck %s 
+; RUN: opt %loadPolly -polly-no-early-exit -polly-codegen-isl -polly-ignore-aliasing < %s
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"
 
 ; CHECK: if (1)
 ; CHECK:     {
-; CHECK:       for (int c1 = 0; c1 <= -Scalar0.val.loadoutside + 99; c1 += 1)
-; CHECK:         Stmt_for_1(c1);
+; CHECK:       for (int c0 = 0; c0 <= -Scalar0.val.loadoutside + 99; c0 += 1)
+; CHECK:         Stmt_for_1(c0);
 ; CHECK:       if (Scalar0.val.loadoutside >= 100)
 ; CHECK:         Stmt_for_1(0);
 ; CHECK:     }

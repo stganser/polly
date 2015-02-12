@@ -80,11 +80,11 @@ Value *polly::createLoop(Value *LB, Value *UB, Value *Stride,
 
   if (OuterLoop) {
     if (GuardBB)
-      OuterLoop->addBasicBlockToLoop(GuardBB, LI.getBase());
-    OuterLoop->addBasicBlockToLoop(PreHeaderBB, LI.getBase());
+      OuterLoop->addBasicBlockToLoop(GuardBB, LI);
+    OuterLoop->addBasicBlockToLoop(PreHeaderBB, LI);
   }
 
-  NewLoop->addBasicBlockToLoop(HeaderBB, LI.getBase());
+  NewLoop->addBasicBlockToLoop(HeaderBB, LI);
 
   // Notify the annotator (if present) that we have a new loop, but only
   // after the header block is set.
@@ -92,7 +92,7 @@ Value *polly::createLoop(Value *LB, Value *UB, Value *Stride,
     Annotator->pushLoop(NewLoop, Parallel);
 
   // ExitBB
-  ExitBB = SplitBlock(BeforeBB, Builder.GetInsertPoint()++, P);
+  ExitBB = SplitBlock(BeforeBB, Builder.GetInsertPoint()++, &DT, &LI);
   ExitBB->setName("polly.loop_exit");
 
   // BeforeBB

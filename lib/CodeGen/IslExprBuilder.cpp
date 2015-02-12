@@ -35,6 +35,8 @@ Value *IslExprBuilder::createOpUnary(__isl_take isl_ast_expr *Expr) {
 
   Value *V;
   Type *MaxType = getType(Expr);
+  assert(MaxType->isIntegerTy() &&
+         "Unary expressions can only be created for integer types");
 
   V = create(isl_ast_expr_get_op_arg(Expr, 0));
   MaxType = getWidestType(MaxType, V->getType());
@@ -112,7 +114,7 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
   const ScopArrayInfo *SAI = ScopArrayInfo::getFromId(BaseId);
   Base = SAI->getBasePtr();
   assert(Base->getType()->isPointerTy() && "Access base should be a pointer");
-  const Twine &BaseName = Base->getName();
+  StringRef BaseName = Base->getName();
 
   if (Base->getType() != SAI->getType())
     Base = Builder.CreateBitCast(Base, SAI->getType(),
@@ -127,7 +129,8 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
     if (!IndexOp)
       IndexOp = NextIndex;
     else
-      IndexOp = Builder.CreateAdd(IndexOp, NextIndex);
+      IndexOp =
+          Builder.CreateAdd(IndexOp, NextIndex, "polly.access.add." + BaseName);
 
     // For every but the last dimension multiply the size, for the last
     // dimension we can exit the loop.
@@ -135,9 +138,17 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
       break;
 
     const SCEV *DimSCEV = SAI->getDimensionSize(u - 1);
-    Value *DimSize = Expander.expandCodeFor(DimSCEV, IndexOp->getType(),
+    Value *DimSize = Expander.expandCodeFor(DimSCEV, DimSCEV->getType(),
                                             Builder.GetInsertPoint());
-    IndexOp = Builder.CreateMul(IndexOp, DimSize);
+
+    Type *Ty = getWidestType(DimSize->getType(), IndexOp->getType());
+
+    if (Ty != IndexOp->getType())
+      IndexOp = Builder.CreateSExtOrTrunc(IndexOp, Ty,
+                                          "polly.access.sext." + BaseName);
+
+    IndexOp =
+        Builder.CreateMul(IndexOp, DimSize, "polly.access.mul." + BaseName);
   }
 
   Access = Builder.CreateGEP(Base, IndexOp, "polly.access." + BaseName);
@@ -155,6 +166,7 @@ Value *IslExprBuilder::createOpAccess(isl_ast_expr *Expr) {
 Value *IslExprBuilder::createOpBin(__isl_take isl_ast_expr *Expr) {
   Value *LHS, *RHS, *Res;
   Type *MaxType;
+  isl_ast_expr *LOp, *ROp;
   isl_ast_op_type OpType;
 
   assert(isl_ast_expr_get_type(Expr) == isl_ast_expr_op &&
@@ -164,11 +176,69 @@ Value *IslExprBuilder::createOpBin(__isl_take isl_ast_expr *Expr) {
 
   OpType = isl_ast_expr_get_op_type(Expr);
 
-  LHS = create(isl_ast_expr_get_op_arg(Expr, 0));
-  RHS = create(isl_ast_expr_get_op_arg(Expr, 1));
+  LOp = isl_ast_expr_get_op_arg(Expr, 0);
+  ROp = isl_ast_expr_get_op_arg(Expr, 1);
 
-  MaxType = LHS->getType();
-  MaxType = getWidestType(MaxType, RHS->getType());
+  // Catch the special case ((-<pointer>) + <pointer>) which is for
+  // isl the same as (<pointer> - <pointer>). We have to treat it here because
+  // there is no valid semantics for the (-<pointer>) expression, hence in
+  // createOpUnary such an expression will trigger a crash.
+  // FIXME: The same problem can now be triggered by a subexpression of the LHS,
+  //        however it is much less likely.
+  if (OpType == isl_ast_op_add &&
+      isl_ast_expr_get_type(LOp) == isl_ast_expr_op &&
+      isl_ast_expr_get_op_type(LOp) == isl_ast_op_minus) {
+    // Change the binary addition to a substraction.
+    OpType = isl_ast_op_sub;
+
+    // Extract the unary operand of the LHS.
+    auto *LOpOp = isl_ast_expr_get_op_arg(LOp, 0);
+    isl_ast_expr_free(LOp);
+
+    // Swap the unary operand of the LHS and the RHS.
+    LOp = ROp;
+    ROp = LOpOp;
+  }
+
+  LHS = create(LOp);
+  RHS = create(ROp);
+
+  Type *LHSType = LHS->getType();
+  Type *RHSType = RHS->getType();
+
+  // Handle <pointer> - <pointer>
+  if (LHSType->isPointerTy() && RHSType->isPointerTy()) {
+    isl_ast_expr_free(Expr);
+    assert(OpType == isl_ast_op_sub && "Substraction is the only valid binary "
+                                       "pointer <-> pointer operation.");
+
+    return Builder.CreatePtrDiff(LHS, RHS);
+  }
+
+  // Handle <pointer> +/- <integer> and <integer> +/- <pointer>
+  if (LHSType->isPointerTy() || RHSType->isPointerTy()) {
+    isl_ast_expr_free(Expr);
+
+    assert((LHSType->isIntegerTy() || RHSType->isIntegerTy()) &&
+           "Arithmetic operations might only performed on one but not two "
+           "pointer types.");
+
+    if (LHSType->isIntegerTy())
+      std::swap(LHS, RHS);
+
+    switch (OpType) {
+    default:
+      llvm_unreachable(
+          "Only additive binary operations are allowed on pointer types.");
+    case isl_ast_op_sub:
+      RHS = Builder.CreateNeg(RHS);
+    // Fall through
+    case isl_ast_op_add:
+      return Builder.CreateGEP(LHS, RHS);
+    }
+  }
+
+  MaxType = getWidestType(LHSType, RHSType);
 
   // Take the result into account when calculating the widest type.
   //
@@ -280,13 +350,16 @@ Value *IslExprBuilder::createOpICmp(__isl_take isl_ast_expr *Expr) {
   LHS = create(isl_ast_expr_get_op_arg(Expr, 0));
   RHS = create(isl_ast_expr_get_op_arg(Expr, 1));
 
-  bool IsPtrType = LHS->getType()->isPointerTy();
-  assert((!IsPtrType || RHS->getType()->isPointerTy()) &&
-         "Both ICmp operators should be pointer types or none of them");
+  bool IsPtrType =
+      LHS->getType()->isPointerTy() || RHS->getType()->isPointerTy();
 
   if (LHS->getType() != RHS->getType()) {
     if (IsPtrType) {
       Type *I8PtrTy = Builder.getInt8PtrTy();
+      if (!LHS->getType()->isPointerTy())
+        LHS = Builder.CreateIntToPtr(LHS, I8PtrTy);
+      if (!RHS->getType()->isPointerTy())
+        RHS = Builder.CreateIntToPtr(RHS, I8PtrTy);
       if (LHS->getType() != I8PtrTy)
         LHS = Builder.CreateBitCast(LHS, I8PtrTy);
       if (RHS->getType() != I8PtrTy)

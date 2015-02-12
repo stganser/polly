@@ -1,5 +1,5 @@
-; RUN: opt %loadPolly -polly-ast -analyze  -S < %s | FileCheck %s
-; RUN: opt %loadPolly -polly-codegen-isl < %s
+; RUN: opt %loadPolly -polly-no-early-exit -polly-ast -analyze  -S < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-no-early-exit -polly-codegen-isl < %s
 
 ;#define N 20
 ;#include "limits.h"
@@ -65,5 +65,5 @@ return:                                           ; preds = %if.else, %if.then
   ret i32 %retval.0
 }
 
-; CHECK: for (int c1 = 0; c1 <= 9223372036854775806; c1 += 1)
-; CHECK:   Stmt_do_body(c1);
+; CHECK: for (int c0 = 0; c0 <= 9223372036854775806; c0 += 1)
+; CHECK:   Stmt_do_body(c0);
