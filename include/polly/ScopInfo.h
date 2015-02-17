@@ -162,8 +162,8 @@ public:
   };
 
 private:
-  MemoryAccess(const MemoryAccess &) LLVM_DELETED_FUNCTION;
-  const MemoryAccess &operator=(const MemoryAccess &) LLVM_DELETED_FUNCTION;
+  MemoryAccess(const MemoryAccess &) = delete;
+  const MemoryAccess &operator=(const MemoryAccess &) = delete;
 
   isl_map *AccessRelation;
   enum AccessType AccType;
@@ -355,8 +355,8 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
 /// At the moment every statement represents a single basic block of LLVM-IR.
 class ScopStmt {
   //===-------------------------------------------------------------------===//
-  ScopStmt(const ScopStmt &) LLVM_DELETED_FUNCTION;
-  const ScopStmt &operator=(const ScopStmt &) LLVM_DELETED_FUNCTION;
+  ScopStmt(const ScopStmt &) = delete;
+  const ScopStmt &operator=(const ScopStmt &) = delete;
 
   /// Polyhedral description
   //@{
@@ -628,8 +628,8 @@ public:
   using MinMaxVectorVectorTy = SmallVector<MinMaxVectorTy *, 4>;
 
 private:
-  Scop(const Scop &) LLVM_DELETED_FUNCTION;
-  const Scop &operator=(const Scop &) LLVM_DELETED_FUNCTION;
+  Scop(const Scop &) = delete;
+  const Scop &operator=(const Scop &) = delete;
 
   ScalarEvolution *SE;
 
@@ -855,6 +855,9 @@ public:
   /// @brief Return the stmt for the given @p BB or nullptr if none.
   ScopStmt *getStmtForBasicBlock(BasicBlock *BB) const;
 
+  /// @brief Return the number of statements in the SCoP.
+  size_t getSize() const { return Stmts.size(); }
+
   /// @name Statements Iterators
   ///
   /// These iterators iterate over all statements of this Scop.
@@ -937,8 +940,8 @@ static inline raw_ostream &operator<<(raw_ostream &O, const Scop &scop) {
 ///
 class ScopInfo : public RegionPass {
   //===-------------------------------------------------------------------===//
-  ScopInfo(const ScopInfo &) LLVM_DELETED_FUNCTION;
-  const ScopInfo &operator=(const ScopInfo &) LLVM_DELETED_FUNCTION;
+  ScopInfo(const ScopInfo &) = delete;
+  const ScopInfo &operator=(const ScopInfo &) = delete;
 
   // The Scop
   Scop *scop;
