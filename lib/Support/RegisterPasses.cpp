@@ -187,6 +187,7 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
 
   PM.add(polly::createScopInfoPass());
 
+#ifndef POLLY_STOP_AFTER_SCOP_INFO
   if (PollyViewer)
     PM.add(polly::createDOTViewerPass());
   if (PollyOnlyViewer)
@@ -230,6 +231,7 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
 
   if (CFGPrinter)
     PM.add(llvm::createCFGPrinterPass());
+#endif
 }
 
 static bool shouldEnablePolly() {

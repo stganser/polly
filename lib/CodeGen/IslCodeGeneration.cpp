@@ -52,6 +52,10 @@
 #include "isl/map.h"
 #include "isl/aff.h"
 
+#ifdef POLLY_CODE_GEN_TIME_LOGGING
+#include <iostream>
+#endif
+
 using namespace polly;
 using namespace llvm;
 
@@ -914,6 +918,9 @@ public:
   }
 
   bool runOnScop(Scop &S) {
+#ifdef POLLY_CODE_GEN_TIME_LOGGING
+	clock_t start = clock();
+#endif
     AI = &getAnalysis<IslAstInfo>();
 
     // Check if we created an isl_ast root node, otherwise exit.
@@ -944,6 +951,12 @@ public:
     Builder.SetInsertPoint(StartBlock->begin());
 
     NodeBuilder.create(AstRoot);
+    
+#ifdef POLLY_CODE_GEN_TIME_LOGGING
+    clock_t end = clock();
+    double duration = ((double) end - start) / CLOCKS_PER_SEC  * 1000.0;
+    std::cerr << "Code generation took " << duration << " milliseconds.\n";
+#endif
     return true;
   }
 

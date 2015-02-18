@@ -257,6 +257,9 @@ struct isl_region {
 	int len;
 };
 
+void isl_tab_basic_set_non_trivial_lexmin_init_max_num_iterations(int n);
+void tab_pip_enable_pip_logging(int enabled);
+
 __isl_give isl_vec *isl_tab_basic_set_non_trivial_lexmin(
 	__isl_take isl_basic_set *bset, int n_op, int n_region,
 	struct isl_region *region,
