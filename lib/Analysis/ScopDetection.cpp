@@ -84,6 +84,11 @@ static cl::opt<bool>
                               cl::Hidden, cl::init(false), cl::ZeroOrMore,
                               cl::cat(PollyCategory));
 
+static cl::opt<bool> DetectUnprofitable("polly-detect-unprofitable",
+                                        cl::desc("Detect unprofitable scops"),
+                                        cl::Hidden, cl::init(false),
+                                        cl::ZeroOrMore, cl::cat(PollyCategory));
+
 static cl::opt<std::string> OnlyFunction(
     "polly-only-func",
     cl::desc("Only run on functions that contain a certain string"),
@@ -246,8 +251,10 @@ bool ScopDetection::isMaxRegionInScop(const Region &R, bool Verify) const {
   if (!ValidRegions.count(&R))
     return false;
 
-  if (Verify)
-    return isValidRegion(const_cast<Region &>(R));
+  if (Verify) {
+    DetectionContext Context(const_cast<Region &>(R), *AA, false /*verifying*/);
+    return isValidRegion(Context);
+  }
 
   return true;
 }
@@ -623,8 +630,11 @@ bool ScopDetection::isValidInstruction(Instruction &Inst,
   }
 
   // Check the access function.
-  if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst))
+  if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst)) {
+    Context.hasStores |= isa<StoreInst>(Inst);
+    Context.hasLoads |= isa<LoadInst>(Inst);
     return isValidMemoryAccess(Inst, Context);
+  }
 
   // We do not know this instruction, therefore we assume it is invalid.
   return invalid<ReportUnknownInst>(Context, /*Assert=*/true, &Inst);
@@ -723,10 +733,14 @@ void ScopDetection::findScops(Region &R) {
   if (!DetectRegionsWithoutLoops && regionWithoutLoops(R, LI))
     return;
 
-  bool IsValidRegion = isValidRegion(R);
-  bool HasErrors = RejectLogs.count(&R) > 0;
+  DetectionContext Context(R, *AA, false /*verifying*/);
+  bool RegionIsValid = isValidRegion(Context);
+  bool HasErrors = !RegionIsValid || Context.Log.size() > 0;
 
-  if (IsValidRegion && !HasErrors) {
+  if (PollyTrackFailures && HasErrors)
+    RejectLogs.insert(std::make_pair(&R, Context.Log));
+
+  if (!HasErrors) {
     ++ValidRegion;
     ValidRegions.insert(&R);
     return;
@@ -809,18 +823,6 @@ bool ScopDetection::isValidExit(DetectionContext &Context) const {
   return true;
 }
 
-bool ScopDetection::isValidRegion(Region &R) const {
-  DetectionContext Context(R, *AA, false /*verifying*/);
-
-  bool RegionIsValid = isValidRegion(Context);
-  bool HasErrors = !RegionIsValid || Context.Log.size() > 0;
-
-  if (PollyTrackFailures && HasErrors)
-    RejectLogs.insert(std::make_pair(&R, Context.Log));
-
-  return RegionIsValid;
-}
-
 bool ScopDetection::isValidRegion(DetectionContext &Context) const {
   Region &R = Context.CurRegion;
 
@@ -867,6 +869,11 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
 
   if (!allBlocksValid(Context))
     return false;
+
+  // We can probably not do a lot on scops that only write or only read
+  // data.
+  if (!DetectUnprofitable && (!Context.hasStores || !Context.hasLoads))
+    invalid<ReportUnprofitable>(Context, /*Assert=*/true);
 
   DEBUG(dbgs() << "OK\n");
   return true;

@@ -156,8 +156,15 @@ private:
     SetVector<const SCEVUnknown *> NonAffineAccesses;
     BaseToElSize ElementSize;
 
+    /// @brief The region has at least one load instruction.
+    bool hasLoads;
+
+    /// @brief The region has at least one store instruction.
+    bool hasStores;
+
     DetectionContext(Region &R, AliasAnalysis &AA, bool Verify)
-        : CurRegion(R), AST(AA), Verifying(Verify), Log(&R) {}
+        : CurRegion(R), AST(AA), Verifying(Verify), Log(&R), hasLoads(false),
+          hasStores(false) {}
   };
 
   // Remember the valid regions
@@ -200,13 +207,6 @@ private:
   ///
   /// @return True if R is a Scop, false otherwise.
   bool isValidRegion(DetectionContext &Context) const;
-
-  /// @brief Check if a region is a Scop.
-  ///
-  /// @param Context The context of scop detection.
-  ///
-  /// @return True if R is a Scop, false otherwise.
-  bool isValidRegion(Region &R) const;
 
   /// @brief Check if a call instruction can be part of a Scop.
   ///
