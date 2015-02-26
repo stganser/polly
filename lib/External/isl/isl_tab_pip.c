@@ -5140,8 +5140,16 @@ __isl_give isl_vec *isl_tab_basic_set_non_trivial_lexmin(
 	}
 #endif
 
-	if (!bset)
-		return NULL;
+    if (!bset) {
+#ifdef ISL_REPORT_TAB_BASIC_SET_NON_TRIVIAL_LEXMIN
+		clock_t end = clock();
+		if (time_measurement_and_logging_enabled) {
+			duration_complete = ((double) (end - start_overall)) / CLOCKS_PER_SEC * 1000.0; // milliseconds
+			printf(" duration complete:%f milliseconds\n", duration_complete);
+		}
+#endif
+        return NULL;
+    }
 
 	ctx = isl_basic_set_get_ctx(bset);
 	sol = isl_vec_alloc(ctx, 0);
