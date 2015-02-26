@@ -69,8 +69,8 @@ public:
       : S(S), Builder(Builder), Annotator(Annotator),
         Rewriter(new SCEVExpander(SE, "polly")),
         ExprBuilder(Builder, IDToValue, *Rewriter),
-        BlockGen(Builder, P, LI, SE, &ExprBuilder), P(P), DL(DL), LI(LI),
-        SE(SE), DT(DT) {}
+        BlockGen(Builder, LI, SE, DT, &ExprBuilder), RegionGen(BlockGen), P(P),
+        DL(DL), LI(LI), SE(SE), DT(DT) {}
 
   ~IslNodeBuilder() { delete Rewriter; }
 
@@ -88,6 +88,10 @@ private:
 
   IslExprBuilder ExprBuilder;
   BlockGenerator BlockGen;
+
+  /// @brief Generator for region statements.
+  RegionGenerator RegionGen;
+
   Pass *P;
   const DataLayout &DL;
   LoopInfo &LI;
@@ -804,7 +808,10 @@ void IslNodeBuilder::createUser(__isl_take isl_ast_node *User) {
   Stmt->setAstBuild(IslAstInfo::getBuild(User));
 
   createSubstitutions(Expr, Stmt, VMap, LTS);
-  BlockGen.copyBB(*Stmt, VMap, LTS);
+  if (Stmt->isBlockStmt())
+    BlockGen.copyStmt(*Stmt, VMap, LTS);
+  else
+    RegionGen.copyStmt(*Stmt, VMap, LTS);
 
   isl_ast_node_free(User);
   isl_id_free(Id);
