@@ -38,8 +38,8 @@ for.body3:                                        ; preds = %for.cond1
   %conv4 = fptrunc double %div to float
   %idxprom = sext i32 %j.0 to i64
   %idxprom5 = sext i32 %i.0 to i64
-  %arrayidx = getelementptr inbounds [1536 x [1536 x float]]* @A, i32 0, i64 %idxprom5
-  %arrayidx6 = getelementptr inbounds [1536 x float]* %arrayidx, i32 0, i64 %idxprom
+  %arrayidx = getelementptr inbounds [1536 x [1536 x float]], [1536 x [1536 x float]]* @A, i32 0, i64 %idxprom5
+  %arrayidx6 = getelementptr inbounds [1536 x float], [1536 x float]* %arrayidx, i32 0, i64 %idxprom
   store float %conv4, float* %arrayidx6, align 4
   %mul7 = mul nsw i32 %i.0, %j.0
   %rem8 = srem i32 %mul7, 1024
@@ -49,8 +49,8 @@ for.body3:                                        ; preds = %for.cond1
   %conv12 = fptrunc double %div11 to float
   %idxprom13 = sext i32 %j.0 to i64
   %idxprom14 = sext i32 %i.0 to i64
-  %arrayidx15 = getelementptr inbounds [1536 x [1536 x float]]* @B, i32 0, i64 %idxprom14
-  %arrayidx16 = getelementptr inbounds [1536 x float]* %arrayidx15, i32 0, i64 %idxprom13
+  %arrayidx15 = getelementptr inbounds [1536 x [1536 x float]], [1536 x [1536 x float]]* @B, i32 0, i64 %idxprom14
+  %arrayidx16 = getelementptr inbounds [1536 x float], [1536 x float]* %arrayidx15, i32 0, i64 %idxprom13
   store float %conv12, float* %arrayidx16, align 4
   br label %for.inc
 
@@ -87,12 +87,12 @@ for.cond1:                                        ; preds = %for.inc, %for.body
   br i1 %cmp2, label %for.body3, label %for.end
 
 for.body3:                                        ; preds = %for.cond1
-  %0 = load %struct._IO_FILE** @stdout, align 8
+  %0 = load %struct._IO_FILE*, %struct._IO_FILE** @stdout, align 8
   %idxprom = sext i32 %j.0 to i64
   %idxprom4 = sext i32 %i.0 to i64
-  %arrayidx = getelementptr inbounds [1536 x [1536 x float]]* @C, i32 0, i64 %idxprom4
-  %arrayidx5 = getelementptr inbounds [1536 x float]* %arrayidx, i32 0, i64 %idxprom
-  %1 = load float* %arrayidx5, align 4
+  %arrayidx = getelementptr inbounds [1536 x [1536 x float]], [1536 x [1536 x float]]* @C, i32 0, i64 %idxprom4
+  %arrayidx5 = getelementptr inbounds [1536 x float], [1536 x float]* %arrayidx, i32 0, i64 %idxprom
+  %1 = load float, float* %arrayidx5, align 4
   %conv = fpext float %1 to double
   %call = call i32 (%struct._IO_FILE*, i8*, ...)* @fprintf(%struct._IO_FILE* %0, i8* getelementptr inbounds ([5 x i8]* @.str, i32 0, i32 0), double %conv)
   %rem = srem i32 %j.0, 80
@@ -100,7 +100,7 @@ for.body3:                                        ; preds = %for.cond1
   br i1 %cmp6, label %if.then, label %if.end
 
 if.then:                                          ; preds = %for.body3
-  %2 = load %struct._IO_FILE** @stdout, align 8
+  %2 = load %struct._IO_FILE*, %struct._IO_FILE** @stdout, align 8
   %call8 = call i32 (%struct._IO_FILE*, i8*, ...)* @fprintf(%struct._IO_FILE* %2, i8* getelementptr inbounds ([2 x i8]* @.str1, i32 0, i32 0))
   br label %if.end
 
@@ -112,7 +112,7 @@ for.inc:                                          ; preds = %if.end
   br label %for.cond1
 
 for.end:                                          ; preds = %for.cond1
-  %3 = load %struct._IO_FILE** @stdout, align 8
+  %3 = load %struct._IO_FILE*, %struct._IO_FILE** @stdout, align 8
   %call9 = call i32 (%struct._IO_FILE*, i8*, ...)* @fprintf(%struct._IO_FILE* %3, i8* getelementptr inbounds ([2 x i8]* @.str1, i32 0, i32 0))
   br label %for.inc10
 
@@ -147,8 +147,8 @@ for.cond1:                                        ; preds = %for.inc25, %for.bod
 for.body3:                                        ; preds = %for.cond1
   %idxprom = sext i32 %j.0 to i64
   %idxprom4 = sext i32 %i.0 to i64
-  %arrayidx = getelementptr inbounds [1536 x [1536 x float]]* @C, i32 0, i64 %idxprom4
-  %arrayidx5 = getelementptr inbounds [1536 x float]* %arrayidx, i32 0, i64 %idxprom
+  %arrayidx = getelementptr inbounds [1536 x [1536 x float]], [1536 x [1536 x float]]* @C, i32 0, i64 %idxprom4
+  %arrayidx5 = getelementptr inbounds [1536 x float], [1536 x float]* %arrayidx, i32 0, i64 %idxprom
   store float 0.000000e+00, float* %arrayidx5, align 4
   br label %for.cond6
 
@@ -160,25 +160,25 @@ for.cond6:                                        ; preds = %for.inc, %for.body3
 for.body8:                                        ; preds = %for.cond6
   %idxprom9 = sext i32 %j.0 to i64
   %idxprom10 = sext i32 %i.0 to i64
-  %arrayidx11 = getelementptr inbounds [1536 x [1536 x float]]* @C, i32 0, i64 %idxprom10
-  %arrayidx12 = getelementptr inbounds [1536 x float]* %arrayidx11, i32 0, i64 %idxprom9
-  %0 = load float* %arrayidx12, align 4
+  %arrayidx11 = getelementptr inbounds [1536 x [1536 x float]], [1536 x [1536 x float]]* @C, i32 0, i64 %idxprom10
+  %arrayidx12 = getelementptr inbounds [1536 x float], [1536 x float]* %arrayidx11, i32 0, i64 %idxprom9
+  %0 = load float, float* %arrayidx12, align 4
   %idxprom13 = sext i32 %k.0 to i64
   %idxprom14 = sext i32 %i.0 to i64
-  %arrayidx15 = getelementptr inbounds [1536 x [1536 x float]]* @A, i32 0, i64 %idxprom14
-  %arrayidx16 = getelementptr inbounds [1536 x float]* %arrayidx15, i32 0, i64 %idxprom13
-  %1 = load float* %arrayidx16, align 4
+  %arrayidx15 = getelementptr inbounds [1536 x [1536 x float]], [1536 x [1536 x float]]* @A, i32 0, i64 %idxprom14
+  %arrayidx16 = getelementptr inbounds [1536 x float], [1536 x float]* %arrayidx15, i32 0, i64 %idxprom13
+  %1 = load float, float* %arrayidx16, align 4
   %idxprom17 = sext i32 %j.0 to i64
   %idxprom18 = sext i32 %k.0 to i64
-  %arrayidx19 = getelementptr inbounds [1536 x [1536 x float]]* @B, i32 0, i64 %idxprom18
-  %arrayidx20 = getelementptr inbounds [1536 x float]* %arrayidx19, i32 0, i64 %idxprom17
-  %2 = load float* %arrayidx20, align 4
+  %arrayidx19 = getelementptr inbounds [1536 x [1536 x float]], [1536 x [1536 x float]]* @B, i32 0, i64 %idxprom18
+  %arrayidx20 = getelementptr inbounds [1536 x float], [1536 x float]* %arrayidx19, i32 0, i64 %idxprom17
+  %2 = load float, float* %arrayidx20, align 4
   %mul = fmul float %1, %2
   %add = fadd float %0, %mul
   %idxprom21 = sext i32 %j.0 to i64
   %idxprom22 = sext i32 %i.0 to i64
-  %arrayidx23 = getelementptr inbounds [1536 x [1536 x float]]* @C, i32 0, i64 %idxprom22
-  %arrayidx24 = getelementptr inbounds [1536 x float]* %arrayidx23, i32 0, i64 %idxprom21
+  %arrayidx23 = getelementptr inbounds [1536 x [1536 x float]], [1536 x [1536 x float]]* @C, i32 0, i64 %idxprom22
+  %arrayidx24 = getelementptr inbounds [1536 x float], [1536 x float]* %arrayidx23, i32 0, i64 %idxprom21
   store float %add, float* %arrayidx24, align 4
   br label %for.inc
 

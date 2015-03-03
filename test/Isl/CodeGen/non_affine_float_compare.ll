@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-codegen-isl -polly-no-early-exit -polly-allow-nonaffine-branches -S < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-codegen-isl -polly-no-early-exit -polly-allow-nonaffine-branches -S -verify-dom-info < %s | FileCheck %s
 ;
 ;    void f(float *A) {
 ;      for (int i = 0; i < 1024; i++)
@@ -9,26 +9,26 @@
 ;
 ;
 ; CHECK: polly.stmt.bb2:
-; CHECK:   %scevgep[[R0:[0-9]*]] = getelementptr float* %A, i64 %polly.indvar
-; CHECK:   %tmp3_p_scalar_ = load float* %scevgep[[R0]], align 4, !alias.scope !0, !noalias !2
-; CHECK:   %scevgep[[R2:[0-9]*]] = getelementptr float* %scevgep{{[0-9]*}}, i64 %polly.indvar
-; CHECK:   %tmp6_p_scalar_ = load float* %scevgep[[R2]], align 4, !alias.scope !0, !noalias !2
+; CHECK:   %scevgep[[R0:[0-9]*]] = getelementptr float, float* %A, i64 %polly.indvar
+; CHECK:   %tmp3_p_scalar_ = load float, float* %scevgep[[R0]], align 4, !alias.scope !0, !noalias !2
+; CHECK:   %scevgep[[R2:[0-9]*]] = getelementptr float, float* %scevgep{{[0-9]*}}, i64 %polly.indvar
+; CHECK:   %tmp6_p_scalar_ = load float, float* %scevgep[[R2]], align 4, !alias.scope !0, !noalias !2
 ; CHECK:   %p_tmp7 = fcmp oeq float %tmp3_p_scalar_, %tmp6_p_scalar_
-; CHECK:   br i1 %p_tmp7, label %polly.stmt.bb8, label %polly.stmt.bb12.pre
+; CHECK:   br i1 %p_tmp7, label %polly.stmt.bb8, label %polly.stmt.bb12.[[R:[a-zA-Z_.0-9]*]]
 
 ; CHECK: polly.stmt.bb8:
-; CHECK:   %scevgep[[R3:[0-9]*]] = getelementptr float* %A, i64 %polly.indvar
-; CHECK:   %tmp10_p_scalar_ = load float* %scevgep[[R3]], align 4, !alias.scope !0, !noalias !2
+; CHECK:   %scevgep[[R3:[0-9]*]] = getelementptr float, float* %A, i64 %polly.indvar
+; CHECK:   %tmp10_p_scalar_ = load float, float* %scevgep[[R3]], align 4, !alias.scope !0, !noalias !2
 ; CHECK:   %p_tmp11 = fadd float %tmp10_p_scalar_, 1.000000e+00
 ; CHECK:   store float %p_tmp11, float* %scevgep[[R3]], align 4, !alias.scope !0, !noalias !2
-; CHECK:   br label %polly.stmt.bb12.pre
+; CHECK:   br label %polly.stmt.bb12.[[R]]
 
-; CHECK: polly.stmt.bb12.pre:
+; CHECK: polly.stmt.bb12.[[R]]:
 ; CHECK:   br label %polly.stmt.bb12
 
 ; CHECK: polly.stmt.bb12:
-; CHECK:   %scevgep[[R4:[0-9]*]] = getelementptr float* %A, i64 %polly.indvar
-; CHECK:   %tmp10b_p_scalar_ = load float* %scevgep[[R4]], align 4, !alias.scope !0, !noalias !2
+; CHECK:   %scevgep[[R4:[0-9]*]] = getelementptr float, float* %A, i64 %polly.indvar
+; CHECK:   %tmp10b_p_scalar_ = load float, float* %scevgep[[R4]], align 4, !alias.scope !0, !noalias !2
 ; CHECK:   %p_tmp11b = fadd float %tmp10b_p_scalar_, 1.000000e+00
 ; CHECK:   store float %p_tmp11b, float* %scevgep[[R4]], align 4, !alias.scope !0, !noalias !2
 ; CHECK:   %polly.indvar_next = add nsw i64 %polly.indvar, 1
@@ -47,24 +47,24 @@ bb1:                                              ; preds = %bb13, %bb
   br i1 %exitcond, label %bb2, label %bb14
 
 bb2:                                              ; preds = %bb1
-  %tmp = getelementptr inbounds float* %A, i64 %indvars.iv
-  %tmp3 = load float* %tmp, align 4
+  %tmp = getelementptr inbounds float, float* %A, i64 %indvars.iv
+  %tmp3 = load float, float* %tmp, align 4
   %tmp4 = add nsw i64 %indvars.iv, -1
-  %tmp5 = getelementptr inbounds float* %A, i64 %tmp4
-  %tmp6 = load float* %tmp5, align 4
+  %tmp5 = getelementptr inbounds float, float* %A, i64 %tmp4
+  %tmp6 = load float, float* %tmp5, align 4
   %tmp7 = fcmp oeq float %tmp3, %tmp6
   br i1 %tmp7, label %bb8, label %bb12
 
 bb8:                                              ; preds = %bb2
-  %tmp9 = getelementptr inbounds float* %A, i64 %indvars.iv
-  %tmp10 = load float* %tmp9, align 4
+  %tmp9 = getelementptr inbounds float, float* %A, i64 %indvars.iv
+  %tmp10 = load float, float* %tmp9, align 4
   %tmp11 = fadd float %tmp10, 1.000000e+00
   store float %tmp11, float* %tmp9, align 4
   br label %bb12
 
 bb12:                                             ; preds = %bb8, %bb2
-  %tmp9b = getelementptr inbounds float* %A, i64 %indvars.iv
-  %tmp10b = load float* %tmp9b, align 4
+  %tmp9b = getelementptr inbounds float, float* %A, i64 %indvars.iv
+  %tmp10b = load float, float* %tmp9b, align 4
   %tmp11b = fadd float %tmp10b, 1.000000e+00
   store float %tmp11b, float* %tmp9b, align 4
   br label %bb13

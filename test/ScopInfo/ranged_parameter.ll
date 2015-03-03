@@ -15,7 +15,7 @@ target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
 define void @jd(i32* %A, i32* %p) {
 entry:
-  %tmp = load i32* %p, align 4, !range !0
+  %tmp = load i32, i32* %p, align 4, !range !0
   br label %for.cond
 
 for.cond:                                         ; preds = %for.inc, %entry
@@ -26,7 +26,7 @@ for.cond:                                         ; preds = %for.inc, %entry
 for.body:                                         ; preds = %for.cond
   %add = add i32 %i.0, %tmp
   %idxprom = sext i32 %add to i64
-  %arrayidx = getelementptr inbounds i32* %A, i64 %idxprom
+  %arrayidx = getelementptr inbounds i32, i32* %A, i64 %idxprom
   store i32 %i.0, i32* %arrayidx, align 4
   br label %for.inc
 

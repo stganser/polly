@@ -16,7 +16,9 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/ScopPass.h"
+
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -55,46 +57,44 @@ static cl::opt<std::string>
 
 struct JSONExporter : public ScopPass {
   static char ID;
-  Scop *S;
   explicit JSONExporter() : ScopPass(ID) {}
 
-  std::string getFileName(Scop *S) const;
-  Json::Value getJSON(Scop &scop) const;
+  std::string getFileName(Scop &S) const;
+  Json::Value getJSON(Scop &S) const;
   virtual bool runOnScop(Scop &S);
-  void printScop(raw_ostream &OS) const;
+  void printScop(raw_ostream &OS, Scop &S) const;
   void getAnalysisUsage(AnalysisUsage &AU) const;
 };
 
 struct JSONImporter : public ScopPass {
   static char ID;
-  Scop *S;
   std::vector<std::string> newAccessStrings;
   explicit JSONImporter() : ScopPass(ID) {}
 
-  std::string getFileName(Scop *S) const;
+  std::string getFileName(Scop &S) const;
   virtual bool runOnScop(Scop &S);
-  void printScop(raw_ostream &OS) const;
+  void printScop(raw_ostream &OS, Scop &S) const;
   void getAnalysisUsage(AnalysisUsage &AU) const;
 };
 }
 
 char JSONExporter::ID = 0;
-std::string JSONExporter::getFileName(Scop *S) const {
-  std::string FunctionName = S->getRegion().getEntry()->getParent()->getName();
-  std::string FileName = FunctionName + "___" + S->getNameStr() + ".jscop";
+std::string JSONExporter::getFileName(Scop &S) const {
+  std::string FunctionName = S.getRegion().getEntry()->getParent()->getName();
+  std::string FileName = FunctionName + "___" + S.getNameStr() + ".jscop";
   return FileName;
 }
 
-void JSONExporter::printScop(raw_ostream &OS) const { S->print(OS); }
+void JSONExporter::printScop(raw_ostream &OS, Scop &S) const { S.print(OS); }
 
-Json::Value JSONExporter::getJSON(Scop &scop) const {
+Json::Value JSONExporter::getJSON(Scop &S) const {
   Json::Value root;
 
-  root["name"] = S->getRegion().getNameStr();
-  root["context"] = S->getContextStr();
+  root["name"] = S.getRegion().getNameStr();
+  root["context"] = S.getContextStr();
   root["statements"];
 
-  for (Scop::iterator SI = S->begin(), SE = S->end(); SI != SE; ++SI) {
+  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
 
     Json::Value statement;
@@ -119,13 +119,12 @@ Json::Value JSONExporter::getJSON(Scop &scop) const {
   return root;
 }
 
-bool JSONExporter::runOnScop(Scop &scop) {
-  S = &scop;
-  Region &R = S->getRegion();
+bool JSONExporter::runOnScop(Scop &S) {
+  Region &R = S.getRegion();
 
   std::string FileName = ImportDir + "/" + getFileName(S);
 
-  Json::Value jscop = getJSON(scop);
+  Json::Value jscop = getJSON(S);
   Json::StyledWriter writer;
   std::string fileContent = writer.write(jscop);
 
@@ -161,9 +160,9 @@ void JSONExporter::getAnalysisUsage(AnalysisUsage &AU) const {
 Pass *polly::createJSONExporterPass() { return new JSONExporter(); }
 
 char JSONImporter::ID = 0;
-std::string JSONImporter::getFileName(Scop *S) const {
-  std::string FunctionName = S->getRegion().getEntry()->getParent()->getName();
-  std::string FileName = FunctionName + "___" + S->getNameStr() + ".jscop";
+std::string JSONImporter::getFileName(Scop &S) const {
+  std::string FunctionName = S.getRegion().getEntry()->getParent()->getName();
+  std::string FileName = FunctionName + "___" + S.getNameStr() + ".jscop";
 
   if (ImportPostfix != "")
     FileName += "." + ImportPostfix;
@@ -171,8 +170,8 @@ std::string JSONImporter::getFileName(Scop *S) const {
   return FileName;
 }
 
-void JSONImporter::printScop(raw_ostream &OS) const {
-  S->print(OS);
+void JSONImporter::printScop(raw_ostream &OS, Scop &S) const {
+  S.print(OS);
   for (std::vector<std::string>::const_iterator I = newAccessStrings.begin(),
                                                 E = newAccessStrings.end();
        I != E; I++)
@@ -181,9 +180,8 @@ void JSONImporter::printScop(raw_ostream &OS) const {
 
 typedef Dependences::StatementToIslMapTy StatementToIslMapTy;
 
-bool JSONImporter::runOnScop(Scop &scop) {
-  S = &scop;
-  Region &R = S->getRegion();
+bool JSONImporter::runOnScop(Scop &S) {
+  Region &R = S.getRegion();
   Dependences *D = &getAnalysis<Dependences>();
   const DataLayout &DL = getAnalysis<DataLayoutPass>().getDataLayout();
 
@@ -211,9 +209,9 @@ bool JSONImporter::runOnScop(Scop &scop) {
     return false;
   }
 
-  isl_set *OldContext = S->getContext();
+  isl_set *OldContext = S.getContext();
   isl_set *NewContext =
-      isl_set_read_from_str(S->getIslCtx(), jscop["context"].asCString());
+      isl_set_read_from_str(S.getIslCtx(), jscop["context"].asCString());
 
   for (unsigned i = 0; i < isl_set_dim(OldContext, isl_dim_param); i++) {
     isl_id *id = isl_set_get_dim_id(OldContext, isl_dim_param, i);
@@ -221,15 +219,15 @@ bool JSONImporter::runOnScop(Scop &scop) {
   }
 
   isl_set_free(OldContext);
-  S->setContext(NewContext);
+  S.setContext(NewContext);
 
   StatementToIslMapTy &NewScattering = *(new StatementToIslMapTy());
 
   int index = 0;
 
-  for (Scop::iterator SI = S->begin(), SE = S->end(); SI != SE; ++SI) {
+  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     Json::Value schedule = jscop["statements"][index]["schedule"];
-    isl_map *m = isl_map_read_from_str(S->getIslCtx(), schedule.asCString());
+    isl_map *m = isl_map_read_from_str(S.getIslCtx(), schedule.asCString());
     isl_space *Space = (*SI)->getDomainSpace();
 
     // Copy the old tuple id. This is necessary to retain the user pointer,
@@ -251,7 +249,7 @@ bool JSONImporter::runOnScop(Scop &scop) {
     return false;
   }
 
-  for (Scop::iterator SI = S->begin(), SE = S->end(); SI != SE; ++SI) {
+  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
 
     if (NewScattering.find(Stmt) != NewScattering.end())
@@ -259,7 +257,7 @@ bool JSONImporter::runOnScop(Scop &scop) {
   }
 
   int statementIdx = 0;
-  for (Scop::iterator SI = S->begin(), SE = S->end(); SI != SE; ++SI) {
+  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
 
     int memoryAccessIdx = 0;
@@ -267,7 +265,7 @@ bool JSONImporter::runOnScop(Scop &scop) {
       Json::Value accesses = jscop["statements"][statementIdx]["accesses"]
                                   [memoryAccessIdx]["relation"];
       isl_map *newAccessMap =
-          isl_map_read_from_str(S->getIslCtx(), accesses.asCString());
+          isl_map_read_from_str(S.getIslCtx(), accesses.asCString());
       isl_map *currentAccessMap = MA->getAccessRelation();
 
       if (isl_map_dim(newAccessMap, isl_dim_param) !=

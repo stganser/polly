@@ -41,6 +41,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
@@ -51,10 +52,6 @@
 #include "isl/set.h"
 #include "isl/map.h"
 #include "isl/aff.h"
-
-#ifdef POLLY_CODE_GEN_TIME_LOGGING
-#include <iostream>
-#endif
 
 using namespace polly;
 using namespace llvm;
@@ -315,17 +312,9 @@ struct FindValuesUser {
   SetVector<const SCEV *> &SCEVs;
 };
 
-/// Extract the values and SCEVs needed to generate code for a ScopStmt.
-///
-/// This function extracts a ScopStmt from a given isl_set and computes the
-/// Values this statement depends on as well as a set of SCEV expressions that
-/// need to be synthesized when generating code for this statment.
-static int findValuesInStmt(isl_set *Set, void *UserPtr) {
-  isl_id *Id = isl_set_get_tuple_id(Set);
-  struct FindValuesUser &User = *static_cast<struct FindValuesUser *>(UserPtr);
-  const ScopStmt *Stmt = static_cast<const ScopStmt *>(isl_id_get_user(Id));
-  const BasicBlock *BB = Stmt->getBasicBlock();
-
+/// @brief Extract the values and SCEVs needed to generate code for a block.
+static int findValuesInBlock(struct FindValuesUser &User, const ScopStmt *Stmt,
+                             const BasicBlock *BB) {
   // Check all the operands of instructions in the basic block.
   for (const Instruction &Inst : *BB) {
     for (Value *SrcVal : Inst.operands()) {
@@ -343,6 +332,28 @@ static int findValuesInStmt(isl_set *Set, void *UserPtr) {
         User.Values.insert(SrcVal);
     }
   }
+  return 0;
+}
+
+/// Extract the values and SCEVs needed to generate code for a ScopStmt.
+///
+/// This function extracts a ScopStmt from a given isl_set and computes the
+/// Values this statement depends on as well as a set of SCEV expressions that
+/// need to be synthesized when generating code for this statment.
+static int findValuesInStmt(isl_set *Set, void *UserPtr) {
+  isl_id *Id = isl_set_get_tuple_id(Set);
+  struct FindValuesUser &User = *static_cast<struct FindValuesUser *>(UserPtr);
+  const ScopStmt *Stmt = static_cast<const ScopStmt *>(isl_id_get_user(Id));
+
+  if (Stmt->isBlockStmt())
+    findValuesInBlock(User, Stmt, Stmt->getBasicBlock());
+  else {
+    assert(Stmt->isRegionStmt() &&
+           "Stmt was neither block nor region statement");
+    for (const BasicBlock *BB : Stmt->getRegion()->blocks())
+      findValuesInBlock(User, Stmt, BB);
+  }
+
   isl_id_free(Id);
   isl_set_free(Set);
   return 0;
@@ -924,22 +935,32 @@ public:
     return RTC;
   }
 
-  bool runOnScop(Scop &S) {
-#ifdef POLLY_CODE_GEN_TIME_LOGGING
-	clock_t start = clock();
-#endif
+  bool verifyGeneratedFunction(Scop &S, Function &F) {
+    if (!verifyFunction(F))
+      return false;
+
+    DEBUG({
+      errs() << "== ISL Codegen created an invalid function ==\n\n== The "
+                "SCoP ==\n";
+      S.print(errs());
+      errs() << "\n== The isl AST ==\n";
+      AI->printScop(errs(), S);
+      errs() << "\n== The invalid function ==\n";
+      F.print(errs());
+      errs() << "\n== The errors ==\n";
+      verifyFunction(F, &errs());
+    });
+
+    return true;
+  }
+
+  bool runOnScop(Scop &S) override {
     AI = &getAnalysis<IslAstInfo>();
 
     // Check if we created an isl_ast root node, otherwise exit.
     isl_ast_node *AstRoot = AI->getAst();
-    if (!AstRoot) {
-#ifdef POLLY_CODE_GEN_TIME_LOGGING
-      clock_t end = clock();
-      double duration = ((double) end - start) / CLOCKS_PER_SEC  * 1000.0;
-      std::cerr << "Code generation took " << duration << " milliseconds.\n";
-#endif
+    if (!AstRoot)
       return false;
-    }
 
     LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
     DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
@@ -964,18 +985,15 @@ public:
     Builder.SetInsertPoint(StartBlock->begin());
 
     NodeBuilder.create(AstRoot);
-    
-#ifdef POLLY_CODE_GEN_TIME_LOGGING
-    clock_t end = clock();
-    double duration = ((double) end - start) / CLOCKS_PER_SEC  * 1000.0;
-    std::cerr << "Code generation took " << duration << " milliseconds.\n";
-#endif
+
+    assert(!verifyGeneratedFunction(S, *EnteringBB->getParent()) &&
+           "Verification of generated function failed");
     return true;
   }
 
-  virtual void printScop(raw_ostream &OS) const {}
+  void printScop(raw_ostream &, Scop &) const override {}
 
-  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<DataLayoutPass>();
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<IslAstInfo>();

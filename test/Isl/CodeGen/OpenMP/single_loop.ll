@@ -60,8 +60,8 @@
 ; IR-NEXT:   br i1 %[[cmp]], label %polly.par.loadIVBounds, label %polly.par.exit
 
 ; IR-LABEL: polly.par.loadIVBounds:
-; IR-NEXT:   %polly.par.LB = load i64* %polly.par.LBPtr
-; IR-NEXT:   %polly.par.UB = load i64* %polly.par.UBPtr
+; IR-NEXT:   %polly.par.LB = load i64, i64* %polly.par.LBPtr
+; IR-NEXT:   %polly.par.UB = load i64, i64* %polly.par.UBPtr
 ; IR-NEXT:   %polly.par.UBAdjusted = sub i64 %polly.par.UB, 1
 ; IR-NEXT:   br label %polly.loop_preheader
 
@@ -73,7 +73,7 @@
 ; IR-NEXT:   br label %polly.stmt.S
 
 ; IR-LABEL: polly.stmt.S:
-; IR-NEXT:   %[[gep:[._a-zA-Z0-9]*]] = getelementptr [1024 x float]* {{.*}}, i64 0, i64 %polly.indvar
+; IR-NEXT:   %[[gep:[._a-zA-Z0-9]*]] = getelementptr [1024 x float], [1024 x float]* {{.*}}, i64 0, i64 %polly.indvar
 ; IR-NEXT:   store float 1.000000e+00, float* %[[gep]]
 ; IR-NEXT:   %polly.indvar_next = add nsw i64 %polly.indvar, 1
 ; IR-NEXT:   %polly.adjust_ub = sub i64 %polly.par.UBAdjusted, 1
@@ -101,7 +101,7 @@ entry:
 
 for.i:
   %indvar = phi i64 [ %indvar.next, %for.inc], [ 0, %entry ]
-  %scevgep = getelementptr [1024 x float]* @A, i64 0, i64 %indvar
+  %scevgep = getelementptr [1024 x float], [1024 x float]* @A, i64 0, i64 %indvar
   %exitcond = icmp ne i64 %indvar, 1024
   br i1 %exitcond, label %S, label %exit
 

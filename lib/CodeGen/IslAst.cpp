@@ -26,6 +26,8 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/Support/GICHelper.h"
+
+#include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Support/Debug.h"
 
 #include "isl/union_map.h"
@@ -305,31 +307,9 @@ static __isl_give isl_ast_node *AtEachDomain(__isl_take isl_ast_node *Node,
 
 void IslAst::buildRunCondition(__isl_keep isl_ast_build *Build) {
   // The conditions that need to be checked at run-time for this scop are
-  // available as an isl_set in the AssumedContext. We generate code for this
-  // check as follows. First, we generate an isl_pw_aff that is 1, if a certain
-  // combination of parameter values fulfills the conditions in the assumed
-  // context, and that is 0 otherwise. We then translate this isl_pw_aff into
-  // an isl_ast_expr. At run-time this expression can be evaluated and the
-  // optimized scop can be executed conditionally according to the result of the
-  // run-time check.
-
-  isl_aff *Zero =
-      isl_aff_zero_on_domain(isl_local_space_from_space(S->getParamSpace()));
-  isl_aff *One =
-      isl_aff_zero_on_domain(isl_local_space_from_space(S->getParamSpace()));
-
-  One = isl_aff_add_constant_si(One, 1);
-
-  isl_pw_aff *PwZero = isl_pw_aff_from_aff(Zero);
-  isl_pw_aff *PwOne = isl_pw_aff_from_aff(One);
-
-  PwOne = isl_pw_aff_intersect_domain(PwOne, S->getAssumedContext());
-  PwZero = isl_pw_aff_intersect_domain(
-      PwZero, isl_set_complement(S->getAssumedContext()));
-
-  isl_pw_aff *Cond = isl_pw_aff_union_max(PwOne, PwZero);
-
-  RunCondition = isl_ast_build_expr_from_pw_aff(Build, Cond);
+  // available as an isl_set in the AssumedContext from which we can directly
+  // derive a run-time condition.
+  RunCondition = isl_ast_build_expr_from_set(Build, S->getAssumedContext());
 
   // Create the alias checks from the minimal/maximal accesses in each alias
   // group. This operation is by construction quadratic in the number of
@@ -451,7 +431,7 @@ bool IslAstInfo::runOnScop(Scop &Scop) {
 
   Ast = new IslAst(&Scop, D);
 
-  DEBUG(printScop(dbgs()));
+  DEBUG(printScop(dbgs(), Scop));
   return false;
 }
 
@@ -537,10 +517,9 @@ isl_ast_build *IslAstInfo::getBuild(__isl_keep isl_ast_node *Node) {
   return Payload ? Payload->Build : nullptr;
 }
 
-void IslAstInfo::printScop(raw_ostream &OS) const {
+void IslAstInfo::printScop(raw_ostream &OS, Scop &S) const {
   isl_ast_print_options *Options;
   isl_ast_node *RootNode = getAst();
-  Scop &S = getCurScop();
   Function *F = S.getRegion().getEntry()->getParent();
 
   OS << ":: isl ast :: " << F->getName() << " :: " << S.getRegion().getNameStr()

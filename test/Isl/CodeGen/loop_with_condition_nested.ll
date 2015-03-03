@@ -60,8 +60,8 @@ define void @loop_with_condition() nounwind {
 
 ; <label>:1                                       ; preds = %10, %0
   %indvar = phi i64 [ %indvar.next, %10 ], [ 0, %0 ] ; <i64> [#uses=5]
-  %scevgep = getelementptr [1024 x i32]* @A, i64 0, i64 %indvar ; <i32*> [#uses=2]
-  %scevgep1 = getelementptr [1024 x i32]* @B, i64 0, i64 %indvar ; <i32*> [#uses=1]
+  %scevgep = getelementptr [1024 x i32], [1024 x i32]* @A, i64 0, i64 %indvar ; <i32*> [#uses=2]
+  %scevgep1 = getelementptr [1024 x i32], [1024 x i32]* @B, i64 0, i64 %indvar ; <i32*> [#uses=1]
   %i.0 = trunc i64 %indvar to i32                 ; <i32> [#uses=2]
   %exitcond = icmp ne i64 %indvar, 1024           ; <i1> [#uses=1]
   br i1 %exitcond, label %2, label %11
@@ -107,13 +107,13 @@ define i32 @main() nounwind {
 
 ; <label>:1                                       ; preds = %8, %0
   %indvar1 = phi i64 [ %indvar.next2, %8 ], [ 0, %0 ] ; <i64> [#uses=3]
-  %scevgep3 = getelementptr [1024 x i32]* @B, i64 0, i64 %indvar1 ; <i32*> [#uses=1]
+  %scevgep3 = getelementptr [1024 x i32], [1024 x i32]* @B, i64 0, i64 %indvar1 ; <i32*> [#uses=1]
   %i.0 = trunc i64 %indvar1 to i32                ; <i32> [#uses=1]
   %2 = icmp slt i32 %i.0, 1024                    ; <i1> [#uses=1]
   br i1 %2, label %3, label %9
 
 ; <label>:3                                       ; preds = %1
-  %4 = load i32* %scevgep3                        ; <i32> [#uses=1]
+  %4 = load i32, i32* %scevgep3                        ; <i32> [#uses=1]
   %5 = icmp ne i32 %4, 3                          ; <i1> [#uses=1]
   br i1 %5, label %6, label %7
 
@@ -132,7 +132,7 @@ define i32 @main() nounwind {
 
 ; <label>:10                                      ; preds = %37, %9
   %indvar = phi i64 [ %indvar.next, %37 ], [ 0, %9 ] ; <i64> [#uses=3]
-  %scevgep = getelementptr [1024 x i32]* @A, i64 0, i64 %indvar ; <i32*> [#uses=3]
+  %scevgep = getelementptr [1024 x i32], [1024 x i32]* @A, i64 0, i64 %indvar ; <i32*> [#uses=3]
   %i.1 = trunc i64 %indvar to i32                 ; <i32> [#uses=6]
   %11 = icmp slt i32 %i.1, 1024                   ; <i1> [#uses=1]
   br i1 %11, label %12, label %38
@@ -146,7 +146,7 @@ define i32 @main() nounwind {
   br i1 %15, label %16, label %20
 
 ; <label>:16                                      ; preds = %14
-  %17 = load i32* %scevgep                        ; <i32> [#uses=1]
+  %17 = load i32, i32* %scevgep                        ; <i32> [#uses=1]
   %18 = icmp ne i32 %17, 1                        ; <i1> [#uses=1]
   br i1 %18, label %19, label %20
 
@@ -162,7 +162,7 @@ define i32 @main() nounwind {
   br i1 %23, label %24, label %28
 
 ; <label>:24                                      ; preds = %22
-  %25 = load i32* %scevgep                        ; <i32> [#uses=1]
+  %25 = load i32, i32* %scevgep                        ; <i32> [#uses=1]
   %26 = icmp ne i32 %25, 2                        ; <i1> [#uses=1]
   br i1 %26, label %27, label %28
 
@@ -174,7 +174,7 @@ define i32 @main() nounwind {
   br i1 %29, label %30, label %34
 
 ; <label>:30                                      ; preds = %28
-  %31 = load i32* %scevgep                        ; <i32> [#uses=1]
+  %31 = load i32, i32* %scevgep                        ; <i32> [#uses=1]
   %32 = icmp ne i32 %31, 0                        ; <i1> [#uses=1]
   br i1 %32, label %33, label %34
 

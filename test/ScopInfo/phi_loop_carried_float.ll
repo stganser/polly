@@ -37,8 +37,8 @@ bb3:                                              ; preds = %bb1
   br label %bb4
 
 bb4:                                              ; preds = %bb3
-  %tmp5 = getelementptr inbounds float* %A, i64 %indvars.iv
-  %tmp6 = load float* %tmp5, align 4
+  %tmp5 = getelementptr inbounds float, float* %A, i64 %indvars.iv
+  %tmp6 = load float, float* %tmp5, align 4
   %tmp7 = fadd float %tmp.0, %tmp6
   %indvars.iv.next = add nuw nsw i64 %indvars.iv, 1
   br label %bb1

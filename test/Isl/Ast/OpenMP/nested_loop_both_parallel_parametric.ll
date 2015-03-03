@@ -24,7 +24,7 @@ loop.j:
   br i1 %exitcond.j, label %loop.body, label %loop.i.backedge
 
 loop.body:
-  %scevgep = getelementptr [1024 x [1024 x i32] ]* @A, i64 0, i64 %j, i64 %i
+  %scevgep = getelementptr [1024 x [1024 x i32] ], [1024 x [1024 x i32] ]* @A, i64 0, i64 %j, i64 %i
   store i32 1, i32* %scevgep
   br label %loop.j.backedge
 
@@ -41,7 +41,7 @@ ret:
   ret void
 }
 
-; CHECK: if (n <= 1024 ? 1 : 0)
+; CHECK: if (n <= 1024)
 ; CHECK:   #pragma omp parallel for
 ; CHECK:   for (int c0 = 0; c0 < n; c0 += 1)
 ; CHECK:     #pragma simd
