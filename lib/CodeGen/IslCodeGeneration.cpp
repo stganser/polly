@@ -53,6 +53,10 @@
 #include "isl/map.h"
 #include "isl/aff.h"
 
+#ifdef POLLY_CODE_GEN_TIME_LOGGING
+#include <iostream>
+#endif
+
 using namespace polly;
 using namespace llvm;
 
@@ -955,12 +959,21 @@ public:
   }
 
   bool runOnScop(Scop &S) override {
+#ifdef POLLY_CODE_GEN_TIME_LOGGING
+	clock_t start = clock();
+#endif
     AI = &getAnalysis<IslAstInfo>();
 
     // Check if we created an isl_ast root node, otherwise exit.
     isl_ast_node *AstRoot = AI->getAst();
-    if (!AstRoot)
+    if (!AstRoot) {
+#ifdef POLLY_CODE_GEN_TIME_LOGGING
+      clock_t end = clock();
+      double duration = ((double) end - start) / CLOCKS_PER_SEC  * 1000.0;
+      std::cerr << "Code generation took " << duration << " milliseconds.\n";
+#endif
       return false;
+    }
 
     LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
     DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
@@ -988,6 +1001,11 @@ public:
 
     assert(!verifyGeneratedFunction(S, *EnteringBB->getParent()) &&
            "Verification of generated function failed");
+#ifdef POLLY_CODE_GEN_TIME_LOGGING
+    clock_t end = clock();
+    double duration = ((double) end - start) / CLOCKS_PER_SEC  * 1000.0;
+    std::cerr << "Code generation took " << duration << " milliseconds.\n";
+#endif
     return true;
   }
 
