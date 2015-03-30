@@ -2209,22 +2209,6 @@ static int needs_row(struct isl_sched_graph *graph, struct isl_sched_node *node)
 	return node->nvar - node->rank >= graph->maxvar - graph->n_row;
 }
 
-/*
- * Limit the number of pivoting steps that may be performed when comoputing a
- * schedule with the Pluto algorithm. If n is less then zero, the maximum number
- * of steps is unlimited.
- */
-void isl_schedule_constraints_compute_schedule_limit_num_pivot_steps(int n) {
-	isl_tab_basic_set_non_trivial_lexmin_init_max_num_iterations(n);
-}
-
-/*
- * Enable additional logging and time measurements for isl_tab_basic_set_non_trivial_lexmin.
- */
-void enable_pip_logging(int enabled) {
-	tab_pip_enable_pip_logging(enabled);
-}
-
 /* Solve the ILP problem constructed in setup_lp.
  * For each node such that all the remaining rows of its schedule
  * need to be non-trivial, we construct a non-triviality region.

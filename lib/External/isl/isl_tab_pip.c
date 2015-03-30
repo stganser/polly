@@ -5049,31 +5049,6 @@ struct isl_trivial {
 	struct isl_tab_undo *snap;
 };
 
-/*
- * Limits the number of steps to optimize a solution that may be performed by
- * isl_tab_basic_set_non_trivial_lexmin. A value < 0 signals that infinitely
- * many steps may be performed.
- */
-static int max_num_iterations = -1;
-
-/*
- * Set the maximum number of steps to optimize a solution that may be performed
- * by isl_tab_basic_set_non_trivial_lexmin. A value < 0 signals that infinitely
- * many steps may be performed.
- */
-void isl_tab_basic_set_non_trivial_lexmin_init_max_num_iterations(int n) {
-	max_num_iterations = n;
-}
-
-static int time_measurement_and_logging_enabled = 0;
-
-/**
- * Enable additional logging and time measurements for isl_tab_basic_set_non_trivial_lexmin.
- */
-void tab_pip_enable_pip_logging(int enabled) {
-    time_measurement_and_logging_enabled = enabled;;
-}
-
 /* Return the lexicographically smallest non-trivial solution of the
  * given ILP problem.
  *
@@ -5128,45 +5103,13 @@ __isl_give isl_vec *isl_tab_basic_set_non_trivial_lexmin(
 
 	int num_iterations = 0;
 
-#ifdef ISL_REPORT_TAB_BASIC_SET_NON_TRIVIAL_LEXMIN
-	clock_t start_overall, end_overall, end_setup, end_initial_tab;
-	double duration_complete, duration_setup, duration_initial_tab;
-
-	/*
-	 * start the time measurement.
-	 */
-	if (time_measurement_and_logging_enabled) {
-		start_overall = clock();
-	}
-#endif
-
-    if (!bset) {
-#ifdef ISL_REPORT_TAB_BASIC_SET_NON_TRIVIAL_LEXMIN
-		clock_t end = clock();
-		if (time_measurement_and_logging_enabled) {
-			duration_complete = ((double) (end - start_overall)) / CLOCKS_PER_SEC * 1000.0; // milliseconds
-			printf(" duration complete:%f milliseconds\n", duration_complete);
-		}
-#endif
+      if (!bset)
         return NULL;
-    }
 
 	ctx = isl_basic_set_get_ctx(bset);
 	sol = isl_vec_alloc(ctx, 0);
 
-#ifdef ISL_REPORT_TAB_BASIC_SET_NON_TRIVIAL_LEXMIN
-	if (time_measurement_and_logging_enabled) {
-		end_setup = clock();
-	}
-#endif
-
 	tab = tab_for_lexmin(bset, NULL, 0, 0);
-
-#ifdef ISL_REPORT_TAB_BASIC_SET_NON_TRIVIAL_LEXMIN
-	if (time_measurement_and_logging_enabled) {
-		end_initial_tab = clock();
-	}
-#endif
 
 	if (!tab)
 		goto error;
@@ -5181,8 +5124,7 @@ __isl_give isl_vec *isl_tab_basic_set_non_trivial_lexmin(
 	level = 0;
 	init = 1;
 
-	while (level >= 0
-			&& (max_num_iterations < 0 || num_iterations < max_num_iterations)) {
+	while (level >= 0) {
 		int side, base;
 
 		/*
@@ -5262,61 +5204,13 @@ backtrack:
 		init = 1;
 	}
 
-#ifdef ISL_REPORT_TAB_BASIC_SET_NON_TRIVIAL_LEXMIN
-	if (time_measurement_and_logging_enabled) {
-		/*
-		 * end of time measurement
-		 */
-		end_overall = clock();
-
-		duration_complete = ((double) (end_overall - start_overall)) / CLOCKS_PER_SEC * 1000.0; // milliseconds
-		duration_setup = ((double) (end_setup - start_overall)) / CLOCKS_PER_SEC * 1000.0;
-		duration_initial_tab = ((double)(end_initial_tab - end_setup)) / CLOCKS_PER_SEC * 1000.0;
-
-        fprintf(stderr, "iterations of the PIP solver to find optimal schedule row: %d\n duration complete:%f milliseconds\n duration setup:%f milliseconds\n duration initial tableau:%f milliseconds\n",
-				num_iterations, duration_complete, duration_setup, duration_initial_tab);
-
-#ifdef ISL_REPORT_TAB_BASIC_SET_NON_TRIVIAL_LEXMIN_PRINT_SOLUTION
-		if (sol) {
-            fprintf(stderr, "pip solution: ");
-            fprintf(stderr, "[ ");
-
-			for (i = 0; i < sol->size; ++i) {
-				__isl_give isl_val *v;
-				v = isl_vec_get_element_val(sol, i);
-                fprintf(stderr, "%ld ", isl_val_get_num_si(v));
-				isl_val_free(v);
-			}
-            fprintf(stderr, "]^T\n");
-		} else {
-            fprintf(stderr, "solution is NULL\n");
-		}
-#endif
-	}
-#endif
-
 	free(triv);
 	isl_vec_free(v);
 	isl_tab_free(tab);
 	isl_basic_set_free(bset);
 
 	return sol;
-	error:
-#ifdef ISL_REPORT_TAB_BASIC_SET_NON_TRIVIAL_LEXMIN
-	/*
-	 * end of time measurement
-	 */
-	if (time_measurement_and_logging_enabled) {
-		end_overall = clock();
-
-		duration_complete = ((double) (end_overall - start_overall)) / CLOCKS_PER_SEC * 1000.0; // milliseconds
-		duration_setup = ((double) (end_setup - start_overall)) / CLOCKS_PER_SEC * 1000.0;
-		duration_initial_tab = ((double)(end_initial_tab - end_setup)) / CLOCKS_PER_SEC * 1000.0;
-
-        fprintf(stderr, "duration complete:%f milliseconds\n duration setup:%f milliseconds\n duration initial tableau:%f milliseconds\n",
-				duration_complete, duration_setup, duration_initial_tab);
-	}
-#endif
+error:
 	free(triv);
 	isl_vec_free(v);
 	isl_tab_free(tab);

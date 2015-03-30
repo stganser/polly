@@ -94,12 +94,6 @@ static cl::list<int> TileSizes("polly-tile-sizes",
                                cl::Hidden, cl::ZeroOrMore, cl::CommaSeparated,
                                cl::cat(PollyCategory));
 
-static cl::opt<int> PlutoPipMaxNumIterations(
-    "polly-pluto-pip-max-num-steps", cl::desc("The maximum number of pivoting "
-    		"steps that the PIP solver may perform during the schedule "
-    		"generation."),
-    cl::Hidden, cl::init(-1), cl::ZeroOrMore, cl::cat(PollyCategory));
-
 namespace {
 
 class IslScheduleOptimizer : public ScopPass {
@@ -482,90 +476,22 @@ bool IslScheduleOptimizer::isProfitableSchedule(
   return changed;
 }
 
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-void printTimeInfo(std::string message, clock_t duration) {
-  double durationInMilliseconds;
-  durationInMilliseconds = ((double) duration) / CLOCKS_PER_SEC * 1000.0;
-  std::cerr << message << durationInMilliseconds << " milliseconds\n";
-}
-
-void printTimeInfo(clock_t duration) {
-  printTimeInfo("Time to optimize the schedule: ", duration);
-}
-
-void printTimeInfoCalcSchedule(clock_t duration) {
-  printTimeInfo("Computing the optimized schedule took ", duration);
-}
-
-void printTimeInfoGetDomain(clock_t duration) {
-  printTimeInfo("Getting the domain took ", duration);
-}
-
-void printTimeInfoGetDependenceAnalysis(clock_t duration) {
-  printTimeInfo("Requesting the dependence analysis took ", duration);
-}
-
-void printTimeInfoGetDependences(clock_t duration) {
-  printTimeInfo("Getting the dependences took ", duration);
-}
-
-void printTimeInfoSetIslOptions(clock_t duration) {
-  printTimeInfo("Setting the ISL options took ", duration);
-}
-
-void printTimeInfoCreateScheduleConstraints(clock_t duration) {
-  printTimeInfo("Creating the schedule constraints took ", duration);
-}
-
-void printTimeInfoSetScatterings(clock_t duration) {
-  printTimeInfo("Setting the statements scatterings took ", duration);
-}
-
-void printTimeInfoSimplifyDependences(clock_t duration) {
-  printTimeInfo("Simplifying the dependences took ", duration);
-}
-#endif
-
 bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   DEBUG(dbgs() << "[" << sys::TimeValue::now().str() << "] ");
   DEBUG(dbgs() << " Running dependence analysis on SCoP " << S.getNameStr() << '\n');
 
-  int plutoPipMaxNumIterations = PlutoPipMaxNumIterations.getValue();
-
-  DEBUG(dbgs() << "Maximum number of pivoting steps to be performed: " << plutoPipMaxNumIterations << "\n");
-
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t start = clock();
-#endif
-
   // Skip empty SCoPs but still allow code generation as it will delete the
   // loops present but not needed.
   if (S.getSize() == 0) {
     S.markAsOptimized();
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-    clock_t end = clock();
-    printTimeInfo(end - start);
-#endif
     return false;
   }
 
-# ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
- clock_t getDependenceAnalysisStart = clock();
-# endif
   Dependences *D = &getAnalysis<Dependences>();
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t getDependenceAnalysisEnd = clock();
-#endif
-  
-  if (!D->hasValidDependences()) {
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-	clock_t end = clock();
-    printTimeInfoGetDependenceAnalysis(getDependenceAnalysisEnd - getDependenceAnalysisStart);
-	printTimeInfo(end - start);
-#endif
+
+  if (!D->hasValidDependences())
     return false;
-  }
   
   isl_schedule_free(LastSchedule);
   LastSchedule = nullptr;
@@ -587,32 +513,13 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
         Dependences::TYPE_RAW | Dependences::TYPE_WAR | Dependences::TYPE_WAW;
   }
 
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t startGetDomain = clock();
-#endif
   isl_union_set *Domain = S.getDomains();
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t endGetDomain = clock();
-#endif
 
-  if (!Domain) {
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-	clock_t end = clock();
-    printTimeInfoGetDependenceAnalysis(getDependenceAnalysisEnd - getDependenceAnalysisStart);
-    printTimeInfoGetDomain(endGetDomain - startGetDomain);
-	printTimeInfo(end - start);
-#endif
+  if (!Domain)
     return false;
-  }
 
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-clock_t startGetDependences = clock();
-#endif
   isl_union_map *Validity = D->getDependences(ValidityKinds);
   isl_union_map *Proximity = D->getDependences(ProximityKinds);
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-clock_t endGetDependences = clock();
-#endif
 
   // Simplify the dependences by removing the constraints introduced by the
   // domains. This can speed up the scheduling time significantly, as large
@@ -631,9 +538,6 @@ clock_t endGetDependences = clock();
     errs() << "warning: Option -polly-opt-simplify-deps should either be 'yes' "
               "or 'no'. Falling back to default: 'yes'\n";
   }
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t endSimplifyDependences =clock();
-#endif
   DEBUG(dbgs() << "\n\nCompute schedule from: ");
   DEBUG(dbgs() << "Domain := " << stringFromIslObj(Domain) << ";\n");
   DEBUG(dbgs() << "Proximity := " << stringFromIslObj(Proximity) << ";\n");
@@ -663,9 +567,6 @@ clock_t endGetDependences = clock();
     IslMaximizeBands = 1;
   }
 
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t startSetIslOptions = clock();
-#endif
   isl_options_set_schedule_fuse(S.getIslCtx(), IslFusionStrategy);
   isl_options_set_schedule_maximize_band_depth(S.getIslCtx(), IslMaximizeBands);
   isl_options_set_schedule_max_constant_term(S.getIslCtx(), MaxConstantTerm);
@@ -673,9 +574,6 @@ clock_t endGetDependences = clock();
 
   isl_options_set_on_error(S.getIslCtx(), ISL_ON_ERROR_CONTINUE);
 
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t endSetIslOptions = clock();
-#endif
   isl_schedule_constraints *ScheduleConstraints;
   ScheduleConstraints = isl_schedule_constraints_on_domain(Domain);
   ScheduleConstraints =
@@ -685,41 +583,14 @@ clock_t endGetDependences = clock();
   ScheduleConstraints =
       isl_schedule_constraints_set_coincidence(ScheduleConstraints, Validity);
   isl_schedule *Schedule;
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t endCreateScheduleConstraints = clock();
-#endif
-
-  isl_schedule_constraints_compute_schedule_limit_num_pivot_steps(plutoPipMaxNumIterations);
-  enable_pip_logging(1);
-
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t startComputeSchedule = clock();
-#endif
 
   Schedule = isl_schedule_constraints_compute_schedule(ScheduleConstraints);
-
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t endComputeSchedule = clock();
-#endif
-  isl_schedule_constraints_compute_schedule_limit_num_pivot_steps(-1);
-  enable_pip_logging(0);
 
   isl_options_set_on_error(S.getIslCtx(), ISL_ON_ERROR_ABORT);
 
   // In cases the scheduler is not able to optimize the code, we just do not
   // touch the schedule.
   if (!Schedule) {
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-	clock_t end = clock();
-	printTimeInfo(end - start);
-    printTimeInfoGetDomain(endGetDomain - startGetDomain);
-    printTimeInfoGetDependenceAnalysis(getDependenceAnalysisEnd - getDependenceAnalysisStart);
-    printTimeInfoGetDependences(endGetDependences - startGetDependences);
-    printTimeInfoSimplifyDependences(endSimplifyDependences - endGetDependences);
-    printTimeInfoSetIslOptions(endSetIslOptions - startSetIslOptions);
-    printTimeInfoCreateScheduleConstraints(endCreateScheduleConstraints - endSetIslOptions);
-	printTimeInfoCalcSchedule(endComputeSchedule - startComputeSchedule);
-#endif
     return false;
   }
 
@@ -731,25 +602,11 @@ clock_t endGetDependences = clock();
   if (!isProfitableSchedule(S, NewSchedule)) {
     isl_schedule_free(Schedule);
     isl_union_map_free(NewSchedule);
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-    clock_t end = clock();
-    printTimeInfo(end - start);
-    printTimeInfoGetDomain(endGetDomain - startGetDomain);
-    printTimeInfoGetDependenceAnalysis(getDependenceAnalysisEnd - getDependenceAnalysisStart);
-    printTimeInfoGetDependences(endGetDependences - startGetDependences);
-    printTimeInfoSimplifyDependences(endSimplifyDependences - endGetDependences);
-    printTimeInfoSetIslOptions(endSetIslOptions - startSetIslOptions);
-    printTimeInfoCreateScheduleConstraints(endCreateScheduleConstraints - endSetIslOptions);
-    printTimeInfoCalcSchedule(endComputeSchedule - startComputeSchedule);
-#endif
     return false;
   }
 
   S.markAsOptimized();
 
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t startSetSttmntScatterings = clock();
-#endif
   for (ScopStmt *Stmt : S) {
     isl_map *StmtSchedule;
     isl_set *Domain = Stmt->getDomain();
@@ -776,19 +633,6 @@ clock_t endGetDependences = clock();
     MaxScatDims = std::max(Stmt->getNumScattering(), MaxScatDims);
 
   extendScattering(S, MaxScatDims);
-
-#ifdef POLLY_SCHEDULE_OPTIMIZER_TIME_LOGGING
-  clock_t end = clock();
-  printTimeInfo(end - start);
-  printTimeInfoGetDomain(endGetDomain - startGetDomain);
-  printTimeInfoGetDependenceAnalysis(getDependenceAnalysisEnd - start);
-  printTimeInfoGetDependences(endGetDependences - startGetDependences);
-  printTimeInfoSimplifyDependences(endSimplifyDependences - endGetDependences);
-  printTimeInfoSetIslOptions(endSetIslOptions - startSetIslOptions);
-  printTimeInfoCreateScheduleConstraints(endCreateScheduleConstraints - endSetIslOptions);
-  printTimeInfoCalcSchedule(endComputeSchedule - startComputeSchedule);
-  printTimeInfoSetScatterings(end - startSetSttmntScatterings);
-#endif
 
   return false;
 }

@@ -67,10 +67,6 @@ isl_ctx *isl_schedule_constraints_get_ctx(
 
 void isl_schedule_constraints_dump(__isl_keep isl_schedule_constraints *sc);
 
-void isl_schedule_constraints_compute_schedule_limit_num_pivot_steps(int n);
-
-void enable_pip_logging(int enabled);
-
 __isl_give isl_schedule *isl_schedule_constraints_compute_schedule(
 	__isl_take isl_schedule_constraints *sc);
 
