@@ -119,6 +119,7 @@ add_polly_library(Polly
   CodeGen/RuntimeDebugBuilder.cpp
   ${GPGPU_CODEGEN_FILES}
   Exchange/JSONExporter.cpp
+  Exchange/LetseeExporter.cpp
   Support/GICHelper.cpp
   Support/SCEVValidator.cpp
   Support/RegisterPasses.cpp

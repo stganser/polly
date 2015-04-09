@@ -97,6 +97,13 @@ static cl::opt<bool> ExportJScop(
     cl::desc("Export the polyhedral description of the detected Scops"),
     cl::Hidden, cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
+static cl::opt<bool> ExportLetsee (
+  "polly-letsee",
+  cl::desc("Export the polyhedral description of the detected Scops to a "
+           "Letsee input file"),
+  cl::Hidden, cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory)
+);
+
 static cl::opt<bool> DeadCodeElim("polly-run-dce",
                                   cl::desc("Run the dead code elimination"),
                                   cl::Hidden, cl::init(false), cl::ZeroOrMore,
@@ -145,6 +152,7 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializeDependencesPass(Registry);
   initializeIndependentBlocksPass(Registry);
   initializeJSONExporterPass(Registry);
+  initializeLetseeExporterPass(Registry);
   initializeJSONImporterPass(Registry);
   initializeIslAstInfoPass(Registry);
   initializeIslScheduleOptimizerPass(Registry);
@@ -219,6 +227,9 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
 
   if (ExportJScop)
     PM.add(polly::createJSONExporterPass());
+
+  if (ExportLetsee)
+      PM.add(polly::createLetseeExporterPass());
 
   switch (PollyCodeGenChoice) {
   case CODEGEN_ISL:
