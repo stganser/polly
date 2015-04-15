@@ -114,9 +114,17 @@ int LetseeExporter::outputAccessRelation(MemoryAccess *MA,
 
   while (std::getline(ss, accessRelVectStr, '\n')) {
     int firstSpaceIndex = accessRelVectStr.find_first_of(' ');
+    std::cout << "old: " << accessRelVectStr << std::endl;
+    //accessRelVectStr
+    //    = accessRelVectStr.replace(0, firstSpaceIndex,
+    //                               (isFirstLine ? ssArrayIdNum.str() : "0"));
+    accessRelVectStr = accessRelVectStr.replace(0, firstSpaceIndex, "");
+    int firstNotOfSpaceIndex = accessRelVectStr.find_first_not_of(" ");
+    accessRelVectStr = accessRelVectStr.replace(0, firstNotOfSpaceIndex, "");
     accessRelVectStr
         = accessRelVectStr.replace(0, firstSpaceIndex,
                                    (isFirstLine ? ssArrayIdNum.str() : "0"));
+    std::cout << "new: " << accessRelVectStr << std::endl;
     result << accessRelVectStr;
 
     if (isFirstLine)
@@ -237,7 +245,7 @@ std::string LetseeExporter::getCloogInput(Scop &S) const {
 
     if (!atLeastOneAccess) {
       errs() << "Failed to export to Letsee format!\n";
-      return 0;
+      return NULL;
     }
     std::stringstream ss(firstMARepr);
     std::string accessRelDimStr;
@@ -260,7 +268,7 @@ std::string LetseeExporter::getCloogInput(Scop &S) const {
             += outputAccessRelation(MA, arrayId2String, &p, accessRelSS);
       }
     }
-    result << accessRelNumRows  << " " << accessRelNumCols << std::endl;
+    result << accessRelNumRows  << " " << (accessRelNumCols - 1) << std::endl;
     result << accessRelSS.str() << std::endl;
 
     accessRelSS.clear();
