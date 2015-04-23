@@ -114,17 +114,12 @@ int LetseeExporter::outputAccessRelation(MemoryAccess *MA,
 
   while (std::getline(ss, accessRelVectStr, '\n')) {
     int firstSpaceIndex = accessRelVectStr.find_first_of(' ');
-    std::cout << "old: " << accessRelVectStr << std::endl;
-    //accessRelVectStr
-    //    = accessRelVectStr.replace(0, firstSpaceIndex,
-    //                               (isFirstLine ? ssArrayIdNum.str() : "0"));
     accessRelVectStr = accessRelVectStr.replace(0, firstSpaceIndex, "");
     int firstNotOfSpaceIndex = accessRelVectStr.find_first_not_of(" ");
     accessRelVectStr = accessRelVectStr.replace(0, firstNotOfSpaceIndex, "");
     accessRelVectStr
         = accessRelVectStr.replace(0, firstSpaceIndex,
                                    (isFirstLine ? ssArrayIdNum.str() : "0"));
-    std::cout << "new: " << accessRelVectStr << std::endl;
     result << accessRelVectStr;
 
     if (isFirstLine)
