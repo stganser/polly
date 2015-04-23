@@ -69,13 +69,13 @@ void getDebugLocation(const Region *R, unsigned &LineBegin, unsigned &LineEnd,
   for (const BasicBlock *BB : R->blocks())
     for (const Instruction &Inst : *BB) {
       DebugLoc DL = Inst.getDebugLoc();
-      if (DL.isUnknown())
+      if (!DL)
         continue;
 
-      DIScope Scope(DL.getScope(Inst.getContext()));
+      auto *Scope = cast<MDScope>(DL.getScope());
 
       if (FileName.empty())
-        FileName = Scope.getFilename();
+        FileName = Scope->getFilename();
 
       unsigned NewLine = DL.getLine();
 
@@ -98,11 +98,11 @@ static void getDebugLocations(const Region *R, DebugLoc &Begin, DebugLoc &End) {
   for (const BasicBlock *BB : R->blocks())
     for (const Instruction &Inst : *BB) {
       DebugLoc DL = Inst.getDebugLoc();
-      if (DL.isUnknown())
+      if (!DL)
         continue;
 
-      Begin = Begin.isUnknown() ? DL : std::min(Begin, DL);
-      End = End.isUnknown() ? DL : std::max(End, DL);
+      Begin = Begin ? std::min(Begin, DL) : DL;
+      End = End ? std::max(End, DL) : DL;
     }
 }
 
@@ -119,8 +119,7 @@ void emitRejectionRemarks(const llvm::Function &F, const RejectLog &Log) {
       "The following errors keep this region from being a Scop.");
 
   for (RejectReasonPtr RR : Log) {
-    const DebugLoc &Loc = RR->getDebugLoc();
-    if (!Loc.isUnknown())
+    if (const DebugLoc &Loc = RR->getDebugLoc())
       emitOptimizationRemarkMissed(Ctx, DEBUG_TYPE, F, Loc,
                                    RR->getEndUserMessage());
   }
@@ -594,10 +593,24 @@ bool ReportEntry::classof(const RejectReason *RR) {
 
 //===----------------------------------------------------------------------===//
 // ReportUnprofitable.
-ReportUnprofitable::ReportUnprofitable() : ReportOther(rrkUnprofitable) {}
+ReportUnprofitable::ReportUnprofitable(Region *R)
+    : ReportOther(rrkUnprofitable), R(R) {}
 
 std::string ReportUnprofitable::getMessage() const {
   return "Region can not profitably be optimized!";
+}
+
+std::string ReportUnprofitable::getEndUserMessage() const {
+  return "No profitable polyhedral optimization found";
+}
+
+const DebugLoc &ReportUnprofitable::getDebugLoc() const {
+  for (const BasicBlock *BB : R->blocks())
+    for (const Instruction &Inst : *BB)
+      if (const DebugLoc &DL = Inst.getDebugLoc())
+        return DL;
+
+  return R->getEntry()->getTerminator()->getDebugLoc();
 }
 
 bool ReportUnprofitable::classof(const RejectReason *RR) {

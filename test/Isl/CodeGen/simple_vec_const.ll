@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-detect-unprofitable -basicaa -polly-codegen-isl %vector-opt -S < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-detect-unprofitable -basicaa -polly-codegen-isl -polly-vectorizer=polly -S < %s | FileCheck %s
 
 ;#define N 1024
 ;float A[N];
@@ -17,7 +17,6 @@
 ;}
 
 target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-s0:64:64-f80:128:128-n8:16:32:64"
-target triple = "x86_64-unknown-linux-gnu"
 
 @A = common global [1024 x float] zeroinitializer, align 16
 @B = common global [1024 x float] zeroinitializer, align 16
@@ -33,7 +32,7 @@ define void @simple_vec_const() nounwind {
   br i1 %exitcond, label %2, label %5
 
 ; <label>:2                                       ; preds = %1
-  %3 = load float, float* getelementptr inbounds ([1024 x float]* @A, i64 0, i64 0), align 16
+  %3 = load float, float* getelementptr inbounds ([1024 x float], [1024 x float]* @A, i64 0, i64 0), align 16
   store float %3, float* %scevgep, align 4
   br label %4
 
@@ -47,7 +46,7 @@ define void @simple_vec_const() nounwind {
 
 define i32 @main() nounwind {
   call void @simple_vec_const()
-  %1 = load float, float* getelementptr inbounds ([1024 x float]* @A, i64 0, i64 42), align 8
+  %1 = load float, float* getelementptr inbounds ([1024 x float], [1024 x float]* @A, i64 0, i64 42), align 8
   %2 = fptosi float %1 to i32
   ret i32 %2
 }

@@ -21,10 +21,6 @@ ifeq ($(GPU_CODEGEN), yes)
 GPGPU_CODEGEN_FILES= CodeGen/PTXGenerator.cpp
 endif
 
-ifeq ($(PLUTO_FOUND), yes)
-POLLY_PLUTO_FILES= Transform/Pluto.cpp
-endif
-
 ISL_CODEGEN_FILES= CodeGen/IslAst.cpp \
                    CodeGen/IslExprBuilder.cpp \
                    CodeGen/IslCodeGeneration.cpp
@@ -119,7 +115,7 @@ SOURCES= Polly.cpp \
 	 Support/SCEVValidator.cpp \
 	 Support/RegisterPasses.cpp \
 	 Support/ScopHelper.cpp \
-	 Analysis/Dependences.cpp \
+	 Analysis/DependenceInfo.cpp \
 	 Analysis/ScopDetection.cpp \
 	 Analysis/ScopDetectionDiagnostic.cpp \
 	 Analysis/ScopInfo.cpp \
@@ -140,7 +136,6 @@ SOURCES= Polly.cpp \
 	 ${GPGPU_FILES} \
 	 ${ISL_CODEGEN_FILES} \
 	 ${POLLY_JSON_FILES} \
-	 ${POLLY_PLUTO_FILES} \
 	 ${ISL_FILES}
 
 #

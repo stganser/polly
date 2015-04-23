@@ -1,9 +1,5 @@
 set(LLVM_NO_RTTI 1)
 
-if (PLUTO_FOUND)
-  set(POLLY_PLUTO_FILES Transform/Pluto.cpp)
-endif (PLUTO_FOUND)
-
 set(POLLY_JSON_FILES
     JSON/json_reader.cpp
     JSON/json_value.cpp
@@ -104,7 +100,7 @@ set (ISL_FILES
 
 
 add_polly_library(Polly
-  Analysis/Dependences.cpp
+  Analysis/DependenceInfo.cpp
   Analysis/ScopDetection.cpp
   Analysis/ScopDetectionDiagnostic.cpp
   Analysis/ScopInfo.cpp
@@ -130,7 +126,6 @@ add_polly_library(Polly
   Transform/DeadCodeElimination.cpp
   Transform/IndependentBlocks.cpp
   Transform/ScheduleOptimizer.cpp
-  ${POLLY_PLUTO_FILES}
   ${ISL_FILES}
   )
 
@@ -143,6 +138,10 @@ if (BUILD_SHARED_LIBS)
     LLVMTransformUtils
     LLVMAnalysis
     LLVMipo
+    LLVMMC
+  )
+  link_directories(
+    ${LLVM_LIBRARY_DIR}
   )
 endif()
 

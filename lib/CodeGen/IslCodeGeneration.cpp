@@ -15,7 +15,7 @@
 // in the Scop. ISL is used to generate an abstract syntax tree that reflects
 // the updated execution order. This clast is used to create new LLVM-IR that is
 // computationally equivalent to the original control flow region, but executes
-// its code in the new execution order defined by the changed scattering.
+// its code in the new execution order defined by the changed schedule.
 //
 //===----------------------------------------------------------------------===//
 #include "polly/Config/config.h"
@@ -25,7 +25,7 @@
 #include "polly/CodeGen/IslAst.h"
 #include "polly/CodeGen/LoopGenerators.h"
 #include "polly/CodeGen/Utils.h"
-#include "polly/Dependences.h"
+#include "polly/DependenceInfo.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/ScopInfo.h"
 #include "polly/Support/GICHelper.h"
@@ -67,13 +67,12 @@ public:
   IslNodeBuilder(PollyIRBuilder &Builder, ScopAnnotator &Annotator, Pass *P,
                  const DataLayout &DL, LoopInfo &LI, ScalarEvolution &SE,
                  DominatorTree &DT, Scop &S)
-      : S(S), Builder(Builder), Annotator(Annotator),
-        Rewriter(new SCEVExpander(SE, "polly")),
-        ExprBuilder(Builder, IDToValue, *Rewriter),
+      : S(S), Builder(Builder), Annotator(Annotator), Rewriter(SE, DL, "polly"),
+        ExprBuilder(Builder, IDToValue, Rewriter, DT, LI),
         BlockGen(Builder, LI, SE, DT, &ExprBuilder), RegionGen(BlockGen), P(P),
         DL(DL), LI(LI), SE(SE), DT(DT) {}
 
-  ~IslNodeBuilder() { delete Rewriter; }
+  ~IslNodeBuilder() {}
 
   void addParameters(__isl_take isl_set *Context);
   void create(__isl_take isl_ast_node *Node);
@@ -85,7 +84,7 @@ private:
   ScopAnnotator &Annotator;
 
   /// @brief A SCEVExpander to create llvm values from SCEVs.
-  SCEVExpander *Rewriter;
+  SCEVExpander Rewriter;
 
   IslExprBuilder ExprBuilder;
   BlockGenerator BlockGen;
@@ -93,7 +92,7 @@ private:
   /// @brief Generator for region statements.
   RegionGenerator RegionGen;
 
-  Pass *P;
+  Pass *const P;
   const DataLayout &DL;
   LoopInfo &LI;
   ScalarEvolution &SE;
@@ -698,7 +697,7 @@ void IslNodeBuilder::createForParallel(__isl_take isl_ast_node *For) {
 }
 
 void IslNodeBuilder::createFor(__isl_take isl_ast_node *For) {
-  bool Vector = PollyVectorizerChoice != VECTORIZER_NONE;
+  bool Vector = PollyVectorizerChoice == VECTORIZER_POLLY;
 
   if (Vector && IslAstInfo::isInnermostParallel(For) &&
       !IslAstInfo::isReductionParallel(For)) {
@@ -845,7 +844,9 @@ void IslNodeBuilder::createBlock(__isl_take isl_ast_node *Block) {
 void IslNodeBuilder::create(__isl_take isl_ast_node *Node) {
   switch (isl_ast_node_get_type(Node)) {
   case isl_ast_node_error:
-    llvm_unreachable("code  generation error");
+    llvm_unreachable("code generation error");
+  case isl_ast_node_mark:
+    llvm_unreachable("Mark node unexpected");
   case isl_ast_node_for:
     createFor(Node);
     return;
@@ -900,7 +901,7 @@ void IslNodeBuilder::addParameters(__isl_take isl_set *Context) {
 
 Value *IslNodeBuilder::generateSCEV(const SCEV *Expr) {
   Instruction *InsertLocation = --(Builder.GetInsertBlock()->end());
-  return Rewriter->expandCodeFor(Expr, Expr->getType(), InsertLocation);
+  return Rewriter.expandCodeFor(Expr, Expr->getType(), InsertLocation);
 }
 
 namespace {
@@ -969,7 +970,7 @@ public:
     LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
     DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     SE = &getAnalysis<ScalarEvolution>();
-    DL = &getAnalysis<DataLayoutPass>().getDataLayout();
+    DL = &S.getRegion().getEntry()->getParent()->getParent()->getDataLayout();
 
     assert(!S.getRegion().isTopLevelRegion() &&
            "Top level regions are not supported");
@@ -982,10 +983,20 @@ public:
     PollyIRBuilder Builder = createPollyIRBuilder(EnteringBB, Annotator);
 
     IslNodeBuilder NodeBuilder(Builder, Annotator, this, *DL, *LI, *SE, *DT, S);
-    NodeBuilder.addParameters(S.getContext());
 
+    // Only build the run-time condition and parameters _after_ having
+    // introduced the conditional branch. This is important as the conditional
+    // branch will guard the original scop from new induction variables that
+    // the SCEVExpander may introduce while code generating the parameters and
+    // which may introduce scalar dependences that prevent us from correctly
+    // code generating this scop.
+    BasicBlock *StartBlock =
+        executeScopConditionally(S, this, Builder.getTrue());
+    auto SplitBlock = StartBlock->getSinglePredecessor();
+    Builder.SetInsertPoint(SplitBlock->getTerminator());
+    NodeBuilder.addParameters(S.getContext());
     Value *RTC = buildRTC(Builder, NodeBuilder.getExprBuilder());
-    BasicBlock *StartBlock = executeScopConditionally(S, this, RTC);
+    SplitBlock->getTerminator()->setOperand(0, RTC);
     Builder.SetInsertPoint(StartBlock->begin());
 
     NodeBuilder.create(AstRoot);
@@ -998,7 +1009,6 @@ public:
   void printScop(raw_ostream &, Scop &) const override {}
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.addRequired<DataLayoutPass>();
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<IslAstInfo>();
     AU.addRequired<RegionInfoPass>();
@@ -1007,7 +1017,7 @@ public:
     AU.addRequired<ScopInfo>();
     AU.addRequired<LoopInfoWrapperPass>();
 
-    AU.addPreserved<Dependences>();
+    AU.addPreserved<DependenceInfo>();
 
     AU.addPreserved<LoopInfoWrapperPass>();
     AU.addPreserved<DominatorTreeWrapperPass>();
@@ -1031,7 +1041,7 @@ Pass *polly::createIslCodeGenerationPass() { return new IslCodeGeneration(); }
 
 INITIALIZE_PASS_BEGIN(IslCodeGeneration, "polly-codegen-isl",
                       "Polly - Create LLVM-IR from SCoPs", false, false);
-INITIALIZE_PASS_DEPENDENCY(Dependences);
+INITIALIZE_PASS_DEPENDENCY(DependenceInfo);
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);

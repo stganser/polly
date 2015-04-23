@@ -228,7 +228,7 @@ public:
       Return.merge(Op);
     }
 
-    if (HasMultipleParams)
+    if (HasMultipleParams && Return.isValid())
       return ValidatorResult(SCEVType::PARAM, Expr);
 
     // TODO: Check for NSW and NUW.
@@ -561,5 +561,24 @@ std::vector<const SCEV *> getParamsInAffineExpr(const Region *R,
   ValidatorResult Result = Validator.visit(Expr);
 
   return Result.getParameters();
+}
+
+std::pair<const SCEV *, const SCEV *>
+extractConstantFactor(const SCEV *S, ScalarEvolution &SE) {
+
+  const SCEV *LeftOver = SE.getConstant(S->getType(), 1);
+  const SCEV *ConstPart = SE.getConstant(S->getType(), 1);
+
+  const SCEVMulExpr *M = dyn_cast<SCEVMulExpr>(S);
+  if (!M)
+    return std::make_pair(ConstPart, S);
+
+  for (const SCEV *Op : M->operands())
+    if (isa<SCEVConstant>(Op))
+      ConstPart = SE.getMulExpr(ConstPart, Op);
+    else
+      LeftOver = SE.getMulExpr(LeftOver, Op);
+
+  return std::make_pair(ConstPart, LeftOver);
 }
 }

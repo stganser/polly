@@ -10,7 +10,6 @@
 ;}
 
 target datalayout = "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64-f32:32:32-f64:32:64-v64:64:64-v128:128:128-a0:0:64-f80:32:32-n8:16:32"
-target triple = "i386-pc-linux-gnu"
 
 @A = common global [100 x i32] zeroinitializer, align 4
 
@@ -30,7 +29,7 @@ for.body:                                         ; preds = %for.cond
   %tmp2 = load i32, i32* %arrayidx, align 4
   %tmp5 = load i32, i32* %arrayidx4, align 4
   %add = add nsw i32 %tmp2, %tmp5
-  store i32 %add, i32* getelementptr inbounds ([100 x i32]* @A, i32 0, i32 13), align 4
+  store i32 %add, i32* getelementptr inbounds ([100 x i32], [100 x i32]* @A, i32 0, i32 13), align 4
   br label %for.inc
 
 for.inc:                                          ; preds = %for.body
@@ -40,4 +39,4 @@ for.inc:                                          ; preds = %for.body
 for.end:                                          ; preds = %for.cond
   ret i32 0
 }
-; CHECK: load i32, i32* getelementptr inbounds ([100 x i32]* @A, i{{(32|64)}} 0, i{{(32|64)}} 10)
+; CHECK: load i32, i32* getelementptr inbounds ([100 x i32], [100 x i32]* @A, i{{(32|64)}} 0, i{{(32|64)}} 10)

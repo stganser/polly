@@ -22,7 +22,7 @@
 #include "polly/RegisterPasses.h"
 #include "polly/Canonicalization.h"
 #include "polly/CodeGen/CodeGeneration.h"
-#include "polly/Dependences.h"
+#include "polly/DependenceInfo.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopDetection.h"
@@ -44,21 +44,16 @@ static cl::opt<bool>
     PollyEnabled("polly", cl::desc("Enable the polly optimizer (only at -O3)"),
                  cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
-enum OptimizerChoice {
-  OPTIMIZER_NONE,
-#ifdef PLUTO_FOUND
-  OPTIMIZER_PLUTO,
-#endif
-  OPTIMIZER_ISL
-};
+static cl::opt<bool> PollyDetectOnly(
+    "polly-only-scop-detection",
+    cl::desc("Only run scop detection, but no other optimizations"),
+    cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
+
+enum OptimizerChoice { OPTIMIZER_NONE, OPTIMIZER_ISL };
 
 static cl::opt<OptimizerChoice> Optimizer(
     "polly-optimizer", cl::desc("Select the scheduling optimizer"),
     cl::values(clEnumValN(OPTIMIZER_NONE, "none", "No optimizer"),
-#ifdef PLUTO_FOUND
-               clEnumValN(OPTIMIZER_PLUTO, "pluto",
-                          "The Pluto scheduling optimizer"),
-#endif
                clEnumValN(OPTIMIZER_ISL, "isl", "The isl scheduling optimizer"),
                clEnumValEnd),
     cl::Hidden, cl::init(OPTIMIZER_ISL), cl::ZeroOrMore,
@@ -76,14 +71,13 @@ static cl::opt<CodeGenChoice, true> XCodeGenerator(
 VectorizerChoice polly::PollyVectorizerChoice;
 static cl::opt<polly::VectorizerChoice, true> Vectorizer(
     "polly-vectorizer", cl::desc("Select the vectorization strategy"),
-    cl::values(clEnumValN(polly::VECTORIZER_NONE, "none", "No Vectorization"),
-               clEnumValN(polly::VECTORIZER_POLLY, "polly",
-                          "Polly internal vectorizer"),
-               clEnumValN(polly::VECTORIZER_UNROLL_ONLY, "unroll-only",
-                          "Only grouped unroll the vectorize candidate loops"),
-               clEnumValN(polly::VECTORIZER_BB, "bb",
-                          "The Basic Block vectorizer driven by Polly"),
-               clEnumValEnd),
+    cl::values(
+        clEnumValN(polly::VECTORIZER_NONE, "none", "No Vectorization"),
+        clEnumValN(polly::VECTORIZER_POLLY, "polly",
+                   "Polly internal vectorizer"),
+        clEnumValN(polly::VECTORIZER_STRIPMINE, "stripmine",
+                   "Strip-mine outer loops for the loop-vectorizer to trigger"),
+        clEnumValEnd),
     cl::location(PollyVectorizerChoice), cl::init(polly::VECTORIZER_NONE),
     cl::ZeroOrMore, cl::cat(PollyCategory));
 
@@ -149,7 +143,7 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializeIslCodeGenerationPass(Registry);
   initializeCodePreparationPass(Registry);
   initializeDeadCodeElimPass(Registry);
-  initializeDependencesPass(Registry);
+  initializeDependenceInfoPass(Registry);
   initializeIndependentBlocksPass(Registry);
   initializeJSONExporterPass(Registry);
   initializeLetseeExporterPass(Registry);
@@ -181,10 +175,8 @@ void initializePollyPasses(PassRegistry &Registry) {
 ///
 /// For certain parts of the Polly optimizer, several alternatives are provided:
 ///
-/// As scheduling optimizer we support PLUTO
-/// (http://pluto-compiler.sourceforge.net) as well as the isl scheduling
-/// optimizer (http://freecode.com/projects/isl). The isl optimizer is the
-/// default optimizer.
+/// As scheduling optimizer we support the isl scheduling optimizer
+/// (http://freecode.com/projects/isl).
 /// It is also possible to run Polly with no optimizer. This mode is mainly
 /// provided to analyze the run and compile time changes caused by the
 /// scheduling optimizer.
@@ -192,6 +184,11 @@ void initializePollyPasses(PassRegistry &Registry) {
 /// Polly supports the isl internal code generator.
 void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
   registerCanonicalicationPasses(PM);
+
+  PM.add(polly::createScopDetectionPass());
+
+  if (PollyDetectOnly)
+    return;
 
   PM.add(polly::createScopInfoPass());
 
@@ -213,12 +210,6 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
   switch (Optimizer) {
   case OPTIMIZER_NONE:
     break; /* Do nothing */
-
-#ifdef PLUTO_FOUND
-  case OPTIMIZER_PLUTO:
-    PM.add(polly::createPlutoOptimizerPass());
-    break;
-#endif
 
   case OPTIMIZER_ISL:
     PM.add(polly::createIslScheduleOptimizerPass());

@@ -21,7 +21,7 @@
 
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/CodeGen/IslAst.h"
-#include "polly/Dependences.h"
+#include "polly/DependenceInfo.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
@@ -73,7 +73,7 @@ static cl::opt<bool> NoEarlyExit(
 namespace polly {
 class IslAst {
 public:
-  IslAst(Scop *Scop, Dependences &D);
+  IslAst(Scop *Scop, const Dependences &D);
 
   ~IslAst();
 
@@ -111,7 +111,7 @@ struct AstBuildUserInfo {
       : Deps(nullptr), InParallelFor(false), LastForNodeId(nullptr) {}
 
   /// @brief The dependence information used for the parallelism check.
-  Dependences *Deps;
+  const Dependences *Deps;
 
   /// @brief Flag to indicate that we are inside a parallel for node.
   bool InParallelFor;
@@ -197,7 +197,7 @@ static isl_printer *cbPrintFor(__isl_take isl_printer *Printer,
 /// we can perform the parallelism check as we are only interested in a zero
 /// (or non-zero) dependence distance on the dimension in question.
 static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
-                                     Dependences *D,
+                                     const Dependences *D,
                                      IslAstUserPayload *NodeInfo) {
   if (!D->hasValidDependences())
     return false;
@@ -362,7 +362,7 @@ static bool benefitsFromPolly(Scop *Scop, bool PerformParallelTest) {
   return true;
 }
 
-IslAst::IslAst(Scop *Scop, Dependences &D)
+IslAst::IslAst(Scop *Scop, const Dependences &D)
     : S(Scop), Root(nullptr), RunCondition(nullptr) {
 
   bool PerformParallelTest = PollyParallel || DetectParallel ||
@@ -427,7 +427,7 @@ bool IslAstInfo::runOnScop(Scop &Scop) {
 
   S = &Scop;
 
-  Dependences &D = getAnalysis<Dependences>();
+  const Dependences &D = getAnalysis<DependenceInfo>().getDependences();
 
   Ast = new IslAst(&Scop, D);
 
@@ -567,7 +567,7 @@ void IslAstInfo::getAnalysisUsage(AnalysisUsage &AU) const {
   // Get the Common analysis usage of ScopPasses.
   ScopPass::getAnalysisUsage(AU);
   AU.addRequired<ScopInfo>();
-  AU.addRequired<Dependences>();
+  AU.addRequired<DependenceInfo>();
 }
 
 char IslAstInfo::ID = 0;
@@ -578,6 +578,6 @@ INITIALIZE_PASS_BEGIN(IslAstInfo, "polly-ast",
                       "Polly - Generate an AST of the SCoP (isl)", false,
                       false);
 INITIALIZE_PASS_DEPENDENCY(ScopInfo);
-INITIALIZE_PASS_DEPENDENCY(Dependences);
+INITIALIZE_PASS_DEPENDENCY(DependenceInfo);
 INITIALIZE_PASS_END(IslAstInfo, "polly-ast",
                     "Polly - Generate an AST from the SCoP (isl)", false, false)

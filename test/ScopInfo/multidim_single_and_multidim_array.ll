@@ -1,5 +1,5 @@
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops -analyze < %s | FileCheck %s
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops -polly-allow-nonaffine -analyze < %s | FileCheck %s --check-prefix=NONAFFINE
+; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops -polly-delinearize=false -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops -polly-delinearize=false -polly-allow-nonaffine -analyze < %s | FileCheck %s --check-prefix=NONAFFINE
 ; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops -polly-delinearize -analyze < %s | FileCheck %s --check-prefix=DELIN
 ; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops -polly-delinearize -polly-allow-nonaffine -analyze < %s | FileCheck %s --check-prefix=DELIN
 
@@ -20,14 +20,14 @@ target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 ; CHECK-NOT: Stmt_for_i_1
 
 ; NONAFFINE: p0: %n
-; NONAFFINE: p1: (4 * (-1 + %n) * %n)
+; NONAFFINE: p1: ((-1 + %n) * %n)
 ; NONAFFINE: Statements {
 ; NONAFFINE:   Stmt_for_i_1
 ; NONAFFINE:         MayWriteAccess :=   [Reduction Type: NONE]
 ; NONAFFINE:             [n, p_1] -> { Stmt_for_i_1[i0] -> MemRef_X[o0] : o0 >= -2305843009213693952 and o0 <= 2305843009213693949 };
 ; NONAFFINE:   Stmt_for_i_2
 ; NONAFFINE:         MustWriteAccess :=  [Reduction Type: NONE]
-; NONAFFINE:             [n, p_1] -> { Stmt_for_i_2[i0] -> MemRef_X[o0] : 4o0 = p_1 + 4i0 };
+; NONAFFINE:             [n, p_1] -> { Stmt_for_i_2[i0] -> MemRef_X[p_1 + i0] };
 
 ; DELIN: Stmt_for_i_1
 ; DELIN:   MustWriteAccess :=

@@ -20,10 +20,8 @@
 namespace polly {
 enum VectorizerChoice {
   VECTORIZER_NONE,
+  VECTORIZER_STRIPMINE,
   VECTORIZER_POLLY,
-  VECTORIZER_UNROLL_ONLY,
-  VECTORIZER_FIRST_NEED_GROUPED_UNROLL = VECTORIZER_UNROLL_ONLY,
-  VECTORIZER_BB
 };
 extern VectorizerChoice PollyVectorizerChoice;
 

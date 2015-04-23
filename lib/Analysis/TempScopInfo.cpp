@@ -28,6 +28,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
 
 using namespace llvm;
@@ -211,7 +212,9 @@ bool TempScopInfo::buildScalarDependences(Instruction *Inst, Region *R,
 
 extern MapInsnToMemAcc InsnToMemAcc;
 
-IRAccess TempScopInfo::buildIRAccess(Instruction *Inst, Loop *L, Region *R) {
+IRAccess
+TempScopInfo::buildIRAccess(Instruction *Inst, Loop *L, Region *R,
+                            const ScopDetection::BoxedLoopsSetTy *BoxedLoops) {
   unsigned Size;
   Type *SizeType;
   enum IRAccess::TypeKind Type;
@@ -239,7 +242,18 @@ IRAccess TempScopInfo::buildIRAccess(Instruction *Inst, Loop *L, Region *R) {
     return IRAccess(Type, BasePointer->getValue(), AccessFunction, Size, true,
                     Acc->DelinearizedSubscripts, Acc->Shape->DelinearizedSizes);
 
-  bool IsAffine = isAffineExpr(R, AccessFunction, *SE, BasePointer->getValue());
+  // Check if the access depends on a loop contained in a non-affine subregion.
+  bool isVariantInNonAffineLoop = false;
+  if (BoxedLoops) {
+    SetVector<const Loop *> Loops;
+    findLoops(AccessFunction, Loops);
+    for (const Loop *L : Loops)
+      if (BoxedLoops->count(L))
+        isVariantInNonAffineLoop = true;
+  }
+
+  bool IsAffine = !isVariantInNonAffineLoop &&
+                  isAffineExpr(R, AccessFunction, *SE, BasePointer->getValue());
 
   SmallVector<const SCEV *, 4> Subscripts, Sizes;
   Subscripts.push_back(AccessFunction);
@@ -272,10 +286,14 @@ void TempScopInfo::buildAccessFunctions(Region &R, BasicBlock &BB,
   AccFuncSetType Functions;
   Loop *L = LI->getLoopFor(&BB);
 
+  // The set of loops contained in non-affine subregions that are part of R.
+  const ScopDetection::BoxedLoopsSetTy *BoxedLoops = SD->getBoxedLoops(&R);
+
   for (BasicBlock::iterator I = BB.begin(), E = --BB.end(); I != E; ++I) {
     Instruction *Inst = I;
     if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst))
-      Functions.push_back(std::make_pair(buildIRAccess(Inst, L, &R), Inst));
+      Functions.push_back(
+          std::make_pair(buildIRAccess(Inst, L, &R, BoxedLoops), Inst));
 
     if (PHINode *PHI = dyn_cast<PHINode>(Inst))
       buildPHIAccesses(PHI, R, Functions, NonAffineSubRegion);
@@ -442,7 +460,7 @@ bool TempScopInfo::runOnFunction(Function &F) {
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   SD = &getAnalysis<ScopDetection>();
   AA = &getAnalysis<AliasAnalysis>();
-  TD = &getAnalysis<DataLayoutPass>().getDataLayout();
+  TD = &F.getParent()->getDataLayout();
   ZeroOffset = SE->getConstant(TD->getIntPtrType(F.getContext()), 0);
 
   for (ScopDetection::iterator I = SD->begin(), E = SD->end(); I != E; ++I) {
@@ -456,7 +474,6 @@ bool TempScopInfo::runOnFunction(Function &F) {
 }
 
 void TempScopInfo::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<DataLayoutPass>();
   AU.addRequiredTransitive<DominatorTreeWrapperPass>();
   AU.addRequiredTransitive<PostDominatorTree>();
   AU.addRequiredTransitive<LoopInfoWrapperPass>();
@@ -491,7 +508,6 @@ INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(PostDominatorTree);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
-INITIALIZE_PASS_DEPENDENCY(DataLayoutPass);
 INITIALIZE_PASS_END(TempScopInfo, "polly-analyze-ir",
                     "Polly - Analyse the LLVM-IR in the detected regions",
                     false, false)
