@@ -168,8 +168,19 @@ std::string LetseeExporter::getCloogInput(Scop &S) const {
   std::map<std::string, int> arrayId2String;
   int arrayCount = 1;
 
+  std::map<const Loop*, int> loop2ID;
+  int loopCounter = 1;
+
   for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
+
+    for (unsigned int i = 0; i < Stmt->getNumIterators(); ++i) {
+      const Loop *l = Stmt->getLoopForDimension(i);
+
+      if (loop2ID.find(l) == loop2ID.end()) {
+        loop2ID[l] = loopCounter++;
+      }
+    }
 
     for (MemoryAccess *MA : *Stmt) {
       std::string arrayIdString = getArrayId(MA);
@@ -210,20 +221,18 @@ std::string LetseeExporter::getCloogInput(Scop &S) const {
     result << "# Iteration Domain" << std::endl;
     std::string iterationDomainStr = printSet(&p, stmtDomain);
     outputMatrix(iterationDomainStr, result);
+    isl_set_free(stmtDomain);
 
     result << std::endl << std::endl << "# Loop Labels" << std::endl;
 
-    {
-      uint i;
+    for (uint i = 0; i < Stmt->getNumIterators(); ++i) {
+      result << loop2ID[Stmt->getLoopForDimension(i)];
 
-      for (i = 1; i <= Stmt->getNumIterators() - 1; ++i) {
-        result << i << ' ';
+      if (i < Stmt->getNumIterators() - 1) {
+        result << " ";
       }
-
-      if (Stmt->getNumIterators() > 0)
-        result << i << std::endl;
     }
-    isl_set_free(stmtDomain);
+    result << std::endl;
     result << std::endl;
 
     std::string firstMARepr;
