@@ -12,7 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "polly/LinkAllPasses.h"
-#include "polly/Dependences.h"
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/ScopPass.h"
@@ -279,7 +278,7 @@ std::string LetseeExporter::getCloogInput(Scop &S) const {
             += outputAccessRelation(MA, arrayId2String, &p, accessRelSS);
       }
     }
-    result << accessRelNumRows << " " << accessRelNumCols << std::endl;
+    result << accessRelNumRows << " " << (accessRelNumCols - 1) << std::endl;
     result << accessRelSS.str() << std::endl;
   }
 
