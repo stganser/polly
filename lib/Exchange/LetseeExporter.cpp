@@ -45,7 +45,7 @@ struct LetseeExporter : public ScopPass {
   void getAnalysisUsage(AnalysisUsage &AU) const;
 
 private:
-  std::string getCloogInput(Scop &S) const;
+  std::string *getCloogInput(Scop &S) const;
   std::string printSet(isl_printer **p, isl_set *s) const;
   std::string printMap(isl_printer **p, isl_map *m) const;
   std::string getArrayId(MemoryAccess *MA) const;
@@ -143,7 +143,7 @@ void LetseeExporter::outputMatrix(
     result << currentLine << std::endl;
 }
 
-std::string LetseeExporter::getCloogInput(Scop &S) const {
+std::string *LetseeExporter::getCloogInput(Scop &S) const {
     std::stringstream result;
     std::string blockDelimiter = "####################";
   isl_ctx *ctx = S.getIslCtx();
@@ -173,6 +173,8 @@ std::string LetseeExporter::getCloogInput(Scop &S) const {
 
   for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
+
+    // TODO: check number of iterators per statement
 
     for (unsigned int i = 0; i < Stmt->getNumIterators(); ++i) {
       const Loop *l = Stmt->getLoopForDimension(i);
@@ -238,27 +240,29 @@ std::string LetseeExporter::getCloogInput(Scop &S) const {
     std::string firstMARepr;
     bool atLeastOneAccess = false;
 
-    for (MemoryAccess *MA : *Stmt) {
-      isl_map *accessRelation = MA->getAccessRelation();
+    if (Stmt->begin() != Stmt->end()) {
+      MemoryAccess *firstMA = *(Stmt->begin());
+      isl_map *accessRelation = firstMA->getAccessRelation();
       firstMARepr = printMap(&p, accessRelation);
       isl_map_free(accessRelation);
       atLeastOneAccess = true;
-      break;
     }
 
-    if (!atLeastOneAccess) {
-      errs() << "Failed to export to Letsee format!\n";
-      return NULL;
-    }
-    std::stringstream ss(firstMARepr);
-    std::string accessRelDimStr;
-
-    for (int i = 0; i < 3; ++i)
-      std::getline(ss, accessRelDimStr, '\n');
-    std::string accessRelNumRowsStr, accessRelNumColsStr;
-    std::istringstream(accessRelDimStr) >> accessRelNumRowsStr >> accessRelNumColsStr;
     int accessRelNumCols;
-    std::istringstream(accessRelNumColsStr) >> accessRelNumCols;
+
+    if (atLeastOneAccess) {
+      std::stringstream ss(firstMARepr);
+      std::string accessRelDimStr;
+
+      for (int i = 0; i < 3; ++i)
+        std::getline(ss, accessRelDimStr, '\n');
+      std::string accessRelNumRowsStr, accessRelNumColsStr;
+      std::istringstream(accessRelDimStr)
+          >> accessRelNumRowsStr >> accessRelNumColsStr;
+      std::istringstream(accessRelNumColsStr) >> accessRelNumCols;
+    } else {
+      accessRelNumCols = 0;
+    }
 
     result << "# Written items" << std::endl;
     std::stringstream accessRelSS;
@@ -296,7 +300,8 @@ std::string LetseeExporter::getCloogInput(Scop &S) const {
 
   isl_printer_free(p);
 
-  return result.str();
+  std::string *resultStr = new std::string(result.str());
+  return resultStr;
 }
 
 bool LetseeExporter::runOnScop(Scop &S) {
@@ -306,24 +311,30 @@ bool LetseeExporter::runOnScop(Scop &S) {
   errs() << "Writing SCoP '" << R.getNameStr() << "' in function '"
          << functionName << "' to '" << fileName << "'.\n";
 
-  std::string fileContent = getCloogInput(S);
+  std::string *fileContent = getCloogInput(S);
+
+  if (!fileContent) {
+      errs() << "Failed to export SCoP to .candl.\n";
+      return false;
+  }
 
   // Write to file.
   std::error_code EC;
   tool_output_file F(fileName, EC, llvm::sys::fs::F_Text);
   if (!EC) {
-    F.os() << fileContent;
+    F.os() << *fileContent;
     F.os().close();
 
     if (!F.os().has_error()) {
       errs() << "\n";
       F.keep();
-      return false;
     }
+    delete(fileContent);
+    return false;
   }
   errs() << "error opening file for writing.\n";
   F.os().clear_error();
-
+  delete(fileContent);
   return false;
 }
 
