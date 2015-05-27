@@ -174,7 +174,12 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
   for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     ScopStmt *Stmt = *SI;
 
-    // TODO: check number of iterators per statement
+    if (Stmt->getNumIterators() < 1) {
+      errs() << "LetseeExporter: Cannot handle statements that are not"
+             << " surrounded by at least one loop.\n";
+      isl_printer_free(p);
+      return nullptr;
+    }
 
     for (unsigned int i = 0; i < Stmt->getNumIterators(); ++i) {
       const Loop *l = Stmt->getLoopForDimension(i);
