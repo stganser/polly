@@ -59,14 +59,13 @@ static cl::opt<OptimizerChoice> Optimizer(
     cl::Hidden, cl::init(OPTIMIZER_ISL), cl::ZeroOrMore,
     cl::cat(PollyCategory));
 
-CodeGenChoice polly::PollyCodeGenChoice;
-static cl::opt<CodeGenChoice, true> XCodeGenerator(
+enum CodeGenChoice { CODEGEN_ISL, CODEGEN_NONE };
+static cl::opt<CodeGenChoice> CodeGenerator(
     "polly-code-generator", cl::desc("Select the code generator"),
     cl::values(clEnumValN(CODEGEN_ISL, "isl", "isl code generator"),
                clEnumValN(CODEGEN_NONE, "none", "no code generation"),
                clEnumValEnd),
-    cl::Hidden, cl::location(PollyCodeGenChoice), cl::init(CODEGEN_ISL),
-    cl::ZeroOrMore, cl::cat(PollyCategory));
+    cl::Hidden, cl::init(CODEGEN_ISL), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 VectorizerChoice polly::PollyVectorizerChoice;
 static cl::opt<polly::VectorizerChoice, true> Vectorizer(
@@ -131,16 +130,9 @@ static cl::opt<bool>
                cl::desc("Show the Polly CFG right after code generation"),
                cl::Hidden, cl::init(false), cl::cat(PollyCategory));
 
-bool polly::PollyAnnotateAliasScopes;
-static cl::opt<bool, true> XPollyAnnotateAliasScopes(
-    "polly-annotate-alias-scopes",
-    cl::desc("Annotate memory instructions with alias scopes"),
-    cl::location(PollyAnnotateAliasScopes), cl::init(true), cl::ZeroOrMore,
-    cl::cat(PollyCategory));
-
 namespace polly {
 void initializePollyPasses(PassRegistry &Registry) {
-  initializeIslCodeGenerationPass(Registry);
+  initializeCodeGenerationPass(Registry);
   initializeCodePreparationPass(Registry);
   initializeDeadCodeElimPass(Registry);
   initializeDependenceInfoPass(Registry);
@@ -222,9 +214,9 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
   if (ExportLetsee)
       PM.add(polly::createLetseeExporterPass());
 
-  switch (PollyCodeGenChoice) {
+  switch (CodeGenerator) {
   case CODEGEN_ISL:
-    PM.add(polly::createIslCodeGenerationPass());
+    PM.add(polly::createCodeGenerationPass());
     break;
   case CODEGEN_NONE:
     break;

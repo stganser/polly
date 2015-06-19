@@ -9,11 +9,11 @@ set(POLLY_JSON_FILES
 set(ISL_CODEGEN_FILES
     CodeGen/IslAst.cpp
     CodeGen/IslExprBuilder.cpp
-    CodeGen/IslCodeGeneration.cpp)
+    CodeGen/IslNodeBuilder.cpp
+    CodeGen/CodeGeneration.cpp)
 
 if (GPU_CODEGEN)
-  set (GPGPU_CODEGEN_FILES
-       CodeGen/PTXGenerator.cpp)
+  set (GPGPU_CODEGEN_FILES)
 endif (GPU_CODEGEN)
 
 set (ISL_FILES
@@ -35,7 +35,6 @@ set (ISL_FILES
     External/isl/isl_convex_hull.c
     External/isl/isl_ctx.c
     External/isl/isl_deprecated.c
-    External/isl/isl_dim.c
     External/isl/isl_dim_map.c
     External/isl/isl_equalities.c
     External/isl/isl_factorization.c
@@ -120,6 +119,7 @@ add_polly_library(Polly
   Support/SCEVValidator.cpp
   Support/RegisterPasses.cpp
   Support/ScopHelper.cpp
+  Support/ScopLocation.cpp
   ${POLLY_JSON_FILES}
   Transform/Canonicalization.cpp
   Transform/CodePreparation.cpp

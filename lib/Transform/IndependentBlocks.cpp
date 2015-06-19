@@ -12,8 +12,8 @@
 //===----------------------------------------------------------------------===//
 //
 #include "polly/LinkAllPasses.h"
-#include "polly/Options.h"
 #include "polly/CodeGen/BlockGenerators.h"
+#include "polly/Options.h"
 #include "polly/ScopDetection.h"
 #include "polly/Support/ScopHelper.h"
 #include "llvm/Analysis/DominanceFrontier.h"
@@ -22,10 +22,9 @@
 #include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/IntrinsicInst.h"
-#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-
+#include "llvm/Transforms/Utils/Local.h"
 #include <vector>
 
 using namespace polly;
@@ -36,7 +35,7 @@ using namespace llvm;
 static cl::opt<bool> DisableIntraScopScalarToArray(
     "disable-polly-intra-scop-scalar-to-array",
     cl::desc("Do not rewrite scalar to array to generate independent blocks"),
-    cl::Hidden, cl::init(false), cl::cat(PollyCategory));
+    cl::Hidden, cl::init(true), cl::cat(PollyCategory));
 
 namespace {
 struct IndependentBlocks : public FunctionPass {

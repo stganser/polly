@@ -1,4 +1,4 @@
-//===------ IslCodeGeneration.cpp - Code generate the Scops using ISL. ----===//
+//===------ IslNodeBuilder.cpp - Translate an isl AST into a LLVM-IR AST---===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,51 +7,45 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The IslCodeGeneration pass takes a Scop created by ScopInfo and translates it
-// back to LLVM-IR using the ISL code generator.
-//
-// The Scop describes the high level memory behaviour of a control flow region.
-// Transformation passes can update the schedule (execution order) of statements
-// in the Scop. ISL is used to generate an abstract syntax tree that reflects
-// the updated execution order. This clast is used to create new LLVM-IR that is
-// computationally equivalent to the original control flow region, but executes
-// its code in the new execution order defined by the changed schedule.
+// This file contains the IslNodeBuilder, a class to translate an isl AST into
+// a LLVM-IR AST.
 //
 //===----------------------------------------------------------------------===//
-#include "polly/Config/config.h"
-#include "polly/CodeGen/IslExprBuilder.h"
+
+#include "polly/CodeGen/IslNodeBuilder.h"
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/CodeGen/IslAst.h"
+#include "polly/CodeGen/IslExprBuilder.h"
 #include "polly/CodeGen/LoopGenerators.h"
 #include "polly/CodeGen/Utils.h"
+#include "polly/Config/config.h"
 #include "polly/DependenceInfo.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/ScopInfo.h"
 #include "polly/Support/GICHelper.h"
-#include "polly/Support/ScopHelper.h"
 #include "polly/Support/SCEVValidator.h"
+#include "polly/Support/ScopHelper.h"
 #include "polly/TempScopInfo.h"
-
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolutionExpander.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/IR/Verifier.h"
-#include "llvm/IR/DataLayout.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
-
-#include "isl/union_map.h"
-#include "isl/list.h"
+#include "isl/aff.h"
 #include "isl/ast.h"
 #include "isl/ast_build.h"
-#include "isl/set.h"
+#include "isl/list.h"
 #include "isl/map.h"
-#include "isl/aff.h"
+#include "isl/set.h"
+#include "isl/union_map.h"
+#include "isl/union_set.h"
 
 #ifdef POLLY_CODE_GEN_TIME_LOGGING
 #include <iostream>
@@ -59,192 +53,6 @@
 
 using namespace polly;
 using namespace llvm;
-
-#define DEBUG_TYPE "polly-codegen-isl"
-
-class IslNodeBuilder {
-public:
-  IslNodeBuilder(PollyIRBuilder &Builder, ScopAnnotator &Annotator, Pass *P,
-                 const DataLayout &DL, LoopInfo &LI, ScalarEvolution &SE,
-                 DominatorTree &DT, Scop &S)
-      : S(S), Builder(Builder), Annotator(Annotator), Rewriter(SE, DL, "polly"),
-        ExprBuilder(Builder, IDToValue, Rewriter, DT, LI),
-        BlockGen(Builder, LI, SE, DT, &ExprBuilder), RegionGen(BlockGen), P(P),
-        DL(DL), LI(LI), SE(SE), DT(DT) {}
-
-  ~IslNodeBuilder() {}
-
-  void addParameters(__isl_take isl_set *Context);
-  void create(__isl_take isl_ast_node *Node);
-  IslExprBuilder &getExprBuilder() { return ExprBuilder; }
-
-private:
-  Scop &S;
-  PollyIRBuilder &Builder;
-  ScopAnnotator &Annotator;
-
-  /// @brief A SCEVExpander to create llvm values from SCEVs.
-  SCEVExpander Rewriter;
-
-  IslExprBuilder ExprBuilder;
-  BlockGenerator BlockGen;
-
-  /// @brief Generator for region statements.
-  RegionGenerator RegionGen;
-
-  Pass *const P;
-  const DataLayout &DL;
-  LoopInfo &LI;
-  ScalarEvolution &SE;
-  DominatorTree &DT;
-
-  /// @brief The current iteration of out-of-scop loops
-  ///
-  /// This map provides for a given loop a llvm::Value that contains the current
-  /// loop iteration.
-  LoopToScevMapT OutsideLoopIterations;
-
-  // This maps an isl_id* to the Value* it has in the generated program. For now
-  // on, the only isl_ids that are stored here are the newly calculated loop
-  // ivs.
-  IslExprBuilder::IDToValueTy IDToValue;
-
-  /// Generate code for a given SCEV*
-  ///
-  /// This function generates code for a given SCEV expression. It generated
-  /// code is emmitted at the end of the basic block our Builder currently
-  /// points to and the resulting value is returned.
-  ///
-  /// @param Expr The expression to code generate.
-  Value *generateSCEV(const SCEV *Expr);
-
-  /// A set of Value -> Value remappings to apply when generating new code.
-  ///
-  /// When generating new code for a ScopStmt this map is used to map certain
-  /// llvm::Values to new llvm::Values.
-  ValueMapT ValueMap;
-
-  // Extract the upper bound of this loop
-  //
-  // The isl code generation can generate arbitrary expressions to check if the
-  // upper bound of a loop is reached, but it provides an option to enforce
-  // 'atomic' upper bounds. An 'atomic upper bound is always of the form
-  // iv <= expr, where expr is an (arbitrary) expression not containing iv.
-  //
-  // This function extracts 'atomic' upper bounds. Polly, in general, requires
-  // atomic upper bounds for the following reasons:
-  //
-  // 1. An atomic upper bound is loop invariant
-  //
-  //    It must not be calculated at each loop iteration and can often even be
-  //    hoisted out further by the loop invariant code motion.
-  //
-  // 2. OpenMP needs a loop invarient upper bound to calculate the number
-  //    of loop iterations.
-  //
-  // 3. With the existing code, upper bounds have been easier to implement.
-  __isl_give isl_ast_expr *getUpperBound(__isl_keep isl_ast_node *For,
-                                         CmpInst::Predicate &Predicate);
-
-  unsigned getNumberOfIterations(__isl_keep isl_ast_node *For);
-
-  /// Compute the values and loops referenced in this subtree.
-  ///
-  /// This function looks at all ScopStmts scheduled below the provided For node
-  /// and finds the llvm::Value[s] and llvm::Loops[s] which are referenced but
-  /// not locally defined.
-  ///
-  /// Values that can be synthesized or that are available as globals are
-  /// considered locally defined.
-  ///
-  /// Loops that contain the scop or that are part of the scop are considered
-  /// locally defined. Loops that are before the scop, but do not contain the
-  /// scop itself are considered not locally defined.
-  ///
-  /// @param For    The node defining the subtree.
-  /// @param Values A vector that will be filled with the Values referenced in
-  ///               this subtree.
-  /// @param Loops  A vector that will be filled with the Loops referenced in
-  ///               this subtree.
-  void getReferencesInSubtree(__isl_keep isl_ast_node *For,
-                              SetVector<Value *> &Values,
-                              SetVector<const Loop *> &Loops);
-
-  /// Change the llvm::Value(s) used for code generation.
-  ///
-  /// When generating code certain values (e.g., references to induction
-  /// variables or array base pointers) in the original code may be replaced by
-  /// new values. This function allows to (partially) update the set of values
-  /// used. A typical use case for this function is the case when we continue
-  /// code generation in a subfunction/kernel function and need to explicitly
-  /// pass down certain values.
-  ///
-  /// @param NewValues A map that maps certain llvm::Values to new llvm::Values.
-  void updateValues(ParallelLoopGenerator::ValueToValueMapTy &NewValues);
-
-  void createFor(__isl_take isl_ast_node *For);
-  void createForVector(__isl_take isl_ast_node *For, int VectorWidth);
-  void createForSequential(__isl_take isl_ast_node *For);
-
-  /// Create LLVM-IR that executes a for node thread parallel.
-  ///
-  /// @param For The FOR isl_ast_node for which code is generated.
-  void createForParallel(__isl_take isl_ast_node *For);
-
-  /// Generate LLVM-IR that computes the values of the original induction
-  /// variables in function of the newly generated loop induction variables.
-  ///
-  /// Example:
-  ///
-  ///   // Original
-  ///   for i
-  ///     for j
-  ///       S(i)
-  ///
-  ///   Schedule: [i,j] -> [i+j, j]
-  ///
-  ///   // New
-  ///   for c0
-  ///     for c1
-  ///       S(c0 - c1, c1)
-  ///
-  /// Assuming the original code consists of two loops which are
-  /// transformed according to a schedule [i,j] -> [c0=i+j,c1=j]. The resulting
-  /// ast models the original statement as a call expression where each argument
-  /// is an expression that computes the old induction variables from the new
-  /// ones, ordered such that the first argument computes the value of induction
-  /// variable that was outermost in the original code.
-  ///
-  /// @param Expr The call expression that represents the statement.
-  /// @param Stmt The statement that is called.
-  /// @param VMap The value map into which the mapping from the old induction
-  ///             variable to the new one is inserted. This mapping is used
-  ///             for the classical code generation (not scev-based) and
-  ///             gives an explicit mapping from an original, materialized
-  ///             induction variable. It consequently can only be expressed
-  ///             if there was an explicit induction variable.
-  /// @param LTS  The loop to SCEV map in which the mapping from the original
-  ///             loop to a SCEV representing the new loop iv is added. This
-  ///             mapping does not require an explicit induction variable.
-  ///             Instead, we think in terms of an implicit induction variable
-  ///             that counts the number of times a loop is executed. For each
-  ///             original loop this count, expressed in function of the new
-  ///             induction variables, is added to the LTS map.
-  void createSubstitutions(__isl_take isl_ast_expr *Expr, ScopStmt *Stmt,
-                           ValueMapT &VMap, LoopToScevMapT &LTS);
-  void createSubstitutionsVector(__isl_take isl_ast_expr *Expr, ScopStmt *Stmt,
-                                 VectorValueMapT &VMap,
-                                 std::vector<LoopToScevMapT> &VLTS,
-                                 std::vector<Value *> &IVS,
-                                 __isl_take isl_id *IteratorID);
-  void createIf(__isl_take isl_ast_node *If);
-  void createUserVector(__isl_take isl_ast_node *User,
-                        std::vector<Value *> &IVS,
-                        __isl_take isl_id *IteratorID,
-                        __isl_take isl_union_map *Schedule);
-  void createUser(__isl_take isl_ast_node *User);
-  void createBlock(__isl_take isl_ast_node *Block);
-};
 
 __isl_give isl_ast_expr *
 IslNodeBuilder::getUpperBound(__isl_keep isl_ast_node *For,
@@ -301,10 +109,46 @@ IslNodeBuilder::getUpperBound(__isl_keep isl_ast_node *For,
 unsigned IslNodeBuilder::getNumberOfIterations(__isl_keep isl_ast_node *For) {
   isl_union_map *Schedule = IslAstInfo::getSchedule(For);
   isl_set *LoopDomain = isl_set_from_union_set(isl_union_map_range(Schedule));
-  int NumberOfIterations = polly::getNumberOfIterations(LoopDomain);
-  if (NumberOfIterations == -1)
+  int Dim = isl_set_dim(LoopDomain, isl_dim_set);
+
+  // Calculate a map similar to the identity map, but with the last input
+  // and output dimension not related.
+  //  [i0, i1, i2, i3] -> [i0, i1, i2, o0]
+  isl_space *Space = isl_set_get_space(LoopDomain);
+  Space = isl_space_drop_dims(Space, isl_dim_out, Dim - 1, 1);
+  Space = isl_space_map_from_set(Space);
+  isl_map *Identity = isl_map_identity(Space);
+  Identity = isl_map_add_dims(Identity, isl_dim_in, 1);
+  Identity = isl_map_add_dims(Identity, isl_dim_out, 1);
+
+  LoopDomain = isl_set_reset_tuple_id(LoopDomain);
+
+  isl_map *Map = isl_map_from_domain_and_range(isl_set_copy(LoopDomain),
+                                               isl_set_copy(LoopDomain));
+  isl_set_free(LoopDomain);
+  Map = isl_map_intersect(Map, Identity);
+
+  isl_map *LexMax = isl_map_lexmax(isl_map_copy(Map));
+  isl_map *LexMin = isl_map_lexmin(Map);
+  isl_map *Sub = isl_map_sum(LexMax, isl_map_neg(LexMin));
+
+  isl_set *Elements = isl_map_range(Sub);
+
+  if (!isl_set_is_singleton(Elements)) {
+    isl_set_free(Elements);
     return -1;
-  return NumberOfIterations + 1;
+  }
+
+  isl_point *P = isl_set_sample_point(Elements);
+
+  isl_val *V;
+  V = isl_point_get_coordinate_val(P, isl_dim_set, Dim - 1);
+  int NumberIterations = isl_val_get_num_si(V);
+  isl_val_free(V);
+  isl_point_free(P);
+  if (NumberIterations == -1)
+    return -1;
+  return NumberIterations + 1;
 }
 
 struct FindValuesUser {
@@ -343,7 +187,7 @@ static int findValuesInBlock(struct FindValuesUser &User, const ScopStmt *Stmt,
 /// This function extracts a ScopStmt from a given isl_set and computes the
 /// Values this statement depends on as well as a set of SCEV expressions that
 /// need to be synthesized when generating code for this statment.
-static int findValuesInStmt(isl_set *Set, void *UserPtr) {
+static isl_stat findValuesInStmt(isl_set *Set, void *UserPtr) {
   isl_id *Id = isl_set_get_tuple_id(Set);
   struct FindValuesUser &User = *static_cast<struct FindValuesUser *>(UserPtr);
   const ScopStmt *Stmt = static_cast<const ScopStmt *>(isl_id_get_user(Id));
@@ -359,7 +203,7 @@ static int findValuesInStmt(isl_set *Set, void *UserPtr) {
 
   isl_id_free(Id);
   isl_set_free(Set);
-  return 0;
+  return isl_stat_ok;
 }
 
 void IslNodeBuilder::getReferencesInSubtree(__isl_keep isl_ast_node *For,
@@ -391,8 +235,7 @@ void IslNodeBuilder::getReferencesInSubtree(__isl_keep isl_ast_node *For,
   /// are considered local. This leaves only loops that are before the scop, but
   /// do not contain the scop itself.
   Loops.remove_if([this](const Loop *L) {
-    return this->S.getRegion().contains(L) ||
-           L->contains(S.getRegion().getEntry());
+    return S.getRegion().contains(L) || L->contains(S.getRegion().getEntry());
   });
 }
 
@@ -903,149 +746,3 @@ Value *IslNodeBuilder::generateSCEV(const SCEV *Expr) {
   Instruction *InsertLocation = --(Builder.GetInsertBlock()->end());
   return Rewriter.expandCodeFor(Expr, Expr->getType(), InsertLocation);
 }
-
-namespace {
-class IslCodeGeneration : public ScopPass {
-public:
-  static char ID;
-
-  IslCodeGeneration() : ScopPass(ID) {}
-
-  /// @brief The datalayout used
-  const DataLayout *DL;
-
-  /// @name The analysis passes we need to generate code.
-  ///
-  ///{
-  LoopInfo *LI;
-  IslAstInfo *AI;
-  DominatorTree *DT;
-  ScalarEvolution *SE;
-  ///}
-
-  /// @brief The loop annotator to generate llvm.loop metadata.
-  ScopAnnotator Annotator;
-
-  /// @brief Build the runtime condition.
-  ///
-  /// Build the condition that evaluates at run-time to true iff all
-  /// assumptions taken for the SCoP hold, and to false otherwise.
-  ///
-  /// @return A value evaluating to true/false if execution is save/unsafe.
-  Value *buildRTC(PollyIRBuilder &Builder, IslExprBuilder &ExprBuilder) {
-    Builder.SetInsertPoint(Builder.GetInsertBlock()->getTerminator());
-    Value *RTC = ExprBuilder.create(AI->getRunCondition());
-    if (!RTC->getType()->isIntegerTy(1))
-      RTC = Builder.CreateIsNotNull(RTC);
-    return RTC;
-  }
-
-  bool verifyGeneratedFunction(Scop &S, Function &F) {
-    if (!verifyFunction(F))
-      return false;
-
-    DEBUG({
-      errs() << "== ISL Codegen created an invalid function ==\n\n== The "
-                "SCoP ==\n";
-      S.print(errs());
-      errs() << "\n== The isl AST ==\n";
-      AI->printScop(errs(), S);
-      errs() << "\n== The invalid function ==\n";
-      F.print(errs());
-      errs() << "\n== The errors ==\n";
-      verifyFunction(F, &errs());
-    });
-
-    return true;
-  }
-
-  bool runOnScop(Scop &S) override {
-    AI = &getAnalysis<IslAstInfo>();
-
-    // Check if we created an isl_ast root node, otherwise exit.
-    isl_ast_node *AstRoot = AI->getAst();
-    if (!AstRoot)
-      return false;
-
-    LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-    DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
-    SE = &getAnalysis<ScalarEvolution>();
-    DL = &S.getRegion().getEntry()->getParent()->getParent()->getDataLayout();
-
-    assert(!S.getRegion().isTopLevelRegion() &&
-           "Top level regions are not supported");
-
-    // Build the alias scopes for annotations first.
-    if (PollyAnnotateAliasScopes)
-      Annotator.buildAliasScopes(S);
-
-    BasicBlock *EnteringBB = simplifyRegion(&S, this);
-    PollyIRBuilder Builder = createPollyIRBuilder(EnteringBB, Annotator);
-
-    IslNodeBuilder NodeBuilder(Builder, Annotator, this, *DL, *LI, *SE, *DT, S);
-
-    // Only build the run-time condition and parameters _after_ having
-    // introduced the conditional branch. This is important as the conditional
-    // branch will guard the original scop from new induction variables that
-    // the SCEVExpander may introduce while code generating the parameters and
-    // which may introduce scalar dependences that prevent us from correctly
-    // code generating this scop.
-    BasicBlock *StartBlock =
-        executeScopConditionally(S, this, Builder.getTrue());
-    auto SplitBlock = StartBlock->getSinglePredecessor();
-    Builder.SetInsertPoint(SplitBlock->getTerminator());
-    NodeBuilder.addParameters(S.getContext());
-    Value *RTC = buildRTC(Builder, NodeBuilder.getExprBuilder());
-    SplitBlock->getTerminator()->setOperand(0, RTC);
-    Builder.SetInsertPoint(StartBlock->begin());
-
-    NodeBuilder.create(AstRoot);
-
-    assert(!verifyGeneratedFunction(S, *EnteringBB->getParent()) &&
-           "Verification of generated function failed");
-    return true;
-  }
-
-  void printScop(raw_ostream &, Scop &) const override {}
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.addRequired<DominatorTreeWrapperPass>();
-    AU.addRequired<IslAstInfo>();
-    AU.addRequired<RegionInfoPass>();
-    AU.addRequired<ScalarEvolution>();
-    AU.addRequired<ScopDetection>();
-    AU.addRequired<ScopInfo>();
-    AU.addRequired<LoopInfoWrapperPass>();
-
-    AU.addPreserved<DependenceInfo>();
-
-    AU.addPreserved<LoopInfoWrapperPass>();
-    AU.addPreserved<DominatorTreeWrapperPass>();
-    AU.addPreserved<IslAstInfo>();
-    AU.addPreserved<ScopDetection>();
-    AU.addPreserved<ScalarEvolution>();
-
-    // FIXME: We do not yet add regions for the newly generated code to the
-    //        region tree.
-    AU.addPreserved<RegionInfoPass>();
-    AU.addPreserved<TempScopInfo>();
-    AU.addPreserved<ScopInfo>();
-    AU.addPreservedID(IndependentBlocksID);
-  }
-};
-}
-
-char IslCodeGeneration::ID = 1;
-
-Pass *polly::createIslCodeGenerationPass() { return new IslCodeGeneration(); }
-
-INITIALIZE_PASS_BEGIN(IslCodeGeneration, "polly-codegen-isl",
-                      "Polly - Create LLVM-IR from SCoPs", false, false);
-INITIALIZE_PASS_DEPENDENCY(DependenceInfo);
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);
-INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
-INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
-INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
-INITIALIZE_PASS_DEPENDENCY(ScopDetection);
-INITIALIZE_PASS_END(IslCodeGeneration, "polly-codegen-isl",
-                    "Polly - Create LLVM-IR from SCoPs", false, false)

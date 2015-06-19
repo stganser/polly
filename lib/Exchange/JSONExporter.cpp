@@ -16,22 +16,19 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/ScopPass.h"
-
+#include "polly/Support/ScopLocation.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/RegionInfo.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/ToolOutputFile.h"
-
+#include "isl/constraint.h"
+#include "isl/map.h"
+#include "isl/printer.h"
+#include "isl/set.h"
 #include "json/reader.h"
 #include "json/writer.h"
-
-#include "isl/set.h"
-#include "isl/map.h"
-#include "isl/constraint.h"
-#include "isl/printer.h"
-
 #include <memory>
 #include <string>
 #include <system_error>
@@ -90,22 +87,30 @@ void JSONExporter::printScop(raw_ostream &OS, Scop &S) const { S.print(OS); }
 
 Json::Value JSONExporter::getJSON(Scop &S) const {
   Json::Value root;
+  unsigned LineBegin, LineEnd;
+  std::string FileName;
+
+  getDebugLocation(&S.getRegion(), LineBegin, LineEnd, FileName);
+  std::string Location;
+  if (LineBegin != (unsigned)-1)
+    Location = FileName + ":" + std::to_string(LineBegin) + "-" +
+               std::to_string(LineEnd);
 
   root["name"] = S.getRegion().getNameStr();
   root["context"] = S.getContextStr();
+  if (LineBegin != (unsigned)-1)
+    root["location"] = Location;
   root["statements"];
 
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
-
+  for (ScopStmt &Stmt : S) {
     Json::Value statement;
 
-    statement["name"] = Stmt->getBaseName();
-    statement["domain"] = Stmt->getDomainStr();
-    statement["schedule"] = Stmt->getScheduleStr();
+    statement["name"] = Stmt.getBaseName();
+    statement["domain"] = Stmt.getDomainStr();
+    statement["schedule"] = Stmt.getScheduleStr();
     statement["accesses"];
 
-    for (MemoryAccess *MA : *Stmt) {
+    for (MemoryAccess *MA : Stmt) {
       Json::Value access;
 
       access["kind"] = MA->isRead() ? "read" : "write";
@@ -227,10 +232,10 @@ bool JSONImporter::runOnScop(Scop &S) {
 
   int index = 0;
 
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
+  for (ScopStmt &Stmt : S) {
     Json::Value schedule = jscop["statements"][index]["schedule"];
     isl_map *m = isl_map_read_from_str(S.getIslCtx(), schedule.asCString());
-    isl_space *Space = (*SI)->getDomainSpace();
+    isl_space *Space = Stmt.getDomainSpace();
 
     // Copy the old tuple id. This is necessary to retain the user pointer,
     // that stores the reference to the ScopStmt this schedule belongs to.
@@ -241,7 +246,7 @@ bool JSONImporter::runOnScop(Scop &S) {
       m = isl_map_set_dim_id(m, isl_dim_param, i, id);
     }
     isl_space_free(Space);
-    NewSchedule[*SI] = m;
+    NewSchedule[&Stmt] = m;
     index++;
   }
 
@@ -255,19 +260,15 @@ bool JSONImporter::runOnScop(Scop &S) {
     return false;
   }
 
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
-
-    if (NewSchedule.find(Stmt) != NewSchedule.end())
-      Stmt->setSchedule(NewSchedule[Stmt]);
+  for (ScopStmt &Stmt : S) {
+    if (NewSchedule.find(&Stmt) != NewSchedule.end())
+      Stmt.setSchedule(NewSchedule[&Stmt]);
   }
 
   int statementIdx = 0;
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
-
+  for (ScopStmt &Stmt : S) {
     int memoryAccessIdx = 0;
-    for (MemoryAccess *MA : *Stmt) {
+    for (MemoryAccess *MA : Stmt) {
       Json::Value accesses = jscop["statements"][statementIdx]["accesses"]
                                   [memoryAccessIdx]["relation"];
       isl_map *newAccessMap =
@@ -342,6 +343,28 @@ bool JSONImporter::runOnScop(Scop &S) {
         isl_map_free(newAccessMap);
         return false;
       }
+
+      auto NewAccessDomain = isl_map_domain(isl_map_copy(newAccessMap));
+      auto CurrentAccessDomain = isl_map_domain(isl_map_copy(currentAccessMap));
+
+      NewAccessDomain =
+          isl_set_intersect_params(NewAccessDomain, S.getContext());
+      CurrentAccessDomain =
+          isl_set_intersect_params(CurrentAccessDomain, S.getContext());
+
+      if (isl_set_is_subset(CurrentAccessDomain, NewAccessDomain) ==
+          isl_bool_false) {
+        errs() << "Mapping not defined for all iteration domain elements\n";
+        isl_set_free(CurrentAccessDomain);
+        isl_set_free(NewAccessDomain);
+        isl_map_free(currentAccessMap);
+        isl_map_free(newAccessMap);
+        return false;
+      }
+
+      isl_set_free(CurrentAccessDomain);
+      isl_set_free(NewAccessDomain);
+
       if (!isl_map_is_equal(newAccessMap, currentAccessMap)) {
         // Statistics.
         ++NewAccessMapFound;
