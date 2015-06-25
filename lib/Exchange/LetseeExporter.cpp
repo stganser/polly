@@ -171,25 +171,24 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
   std::map<const Loop*, int> loop2ID;
   int loopCounter = 1;
 
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
+  for (ScopStmt &Stmt : S) {
 
-    if (Stmt->getNumIterators() < 1) {
+    if (Stmt.getNumIterators() < 1) {
       errs() << "LetseeExporter: Cannot handle statements that are not"
              << " surrounded by at least one loop.\n";
       isl_printer_free(p);
       return nullptr;
     }
 
-    for (unsigned int i = 0; i < Stmt->getNumIterators(); ++i) {
-      const Loop *l = Stmt->getLoopForDimension(i);
+    for (unsigned int i = 0; i < Stmt.getNumIterators(); ++i) {
+      const Loop *l = Stmt.getLoopForDimension(i);
 
       if (loop2ID.find(l) == loop2ID.end()) {
         loop2ID[l] = loopCounter++;
       }
     }
 
-    for (MemoryAccess *MA : *Stmt) {
+    for (MemoryAccess *MA : Stmt) {
       std::string arrayIdString = getArrayId(MA);
 
       if (arrayId2String.find(arrayIdString) == arrayId2String.end())
@@ -199,7 +198,7 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
 
   for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
     statementCount++;
-    ScopStmt *Stmt = *SI;
+    ScopStmt &Stmt = *SI;
 
     result << blockDelimiter << std::endl << "# Statement " << statementCount
            << std::endl;
@@ -207,7 +206,7 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
 
     char reductionType = 'A';
 
-    for (MemoryAccess *MA : *Stmt) {
+    for (MemoryAccess *MA : Stmt) {
       if (MA->isWrite()) {
         switch (MA->getReductionType()) {
           case polly::MemoryAccess::RT_MUL:
@@ -224,7 +223,7 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
     }
     result << reductionType << std::endl << std::endl;
 
-    isl_set *stmtDomain = Stmt->getDomain();
+    isl_set *stmtDomain = Stmt.getDomain();
     result << "# Iteration Domain" << std::endl;
     std::string iterationDomainStr = printSet(&p, stmtDomain);
     outputMatrix(iterationDomainStr, result);
@@ -232,10 +231,10 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
 
     result << std::endl << std::endl << "# Loop Labels" << std::endl;
 
-    for (uint i = 0; i < Stmt->getNumIterators(); ++i) {
-      result << loop2ID[Stmt->getLoopForDimension(i)];
+    for (uint i = 0; i < Stmt.getNumIterators(); ++i) {
+      result << loop2ID[Stmt.getLoopForDimension(i)];
 
-      if (i < Stmt->getNumIterators() - 1) {
+      if (i < Stmt.getNumIterators() - 1) {
         result << " ";
       }
     }
@@ -245,8 +244,8 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
     std::string firstMARepr;
     bool atLeastOneAccess = false;
 
-    if (Stmt->begin() != Stmt->end()) {
-      MemoryAccess *firstMA = *(Stmt->begin());
+    if (Stmt.begin() != Stmt.end()) {
+      MemoryAccess *firstMA = *(Stmt.begin());
       isl_map *accessRelation = firstMA->getAccessRelation();
       firstMARepr = printMap(&p, accessRelation);
       isl_map_free(accessRelation);
@@ -273,7 +272,7 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
     std::stringstream accessRelSS;
     int accessRelNumRows  = 0;
 
-    for (MemoryAccess *MA : *Stmt) {
+    for (MemoryAccess *MA : Stmt) {
 
       if (MA->isWrite()) {
         accessRelNumRows
@@ -289,7 +288,7 @@ std::string *LetseeExporter::getCloogInput(Scop &S) const {
 
     result << "# Read items" << std::endl;
 
-    for (MemoryAccess *MA : *Stmt) {
+    for (MemoryAccess *MA : Stmt) {
 
       if (MA->isRead()) {
         accessRelNumRows
