@@ -166,13 +166,6 @@ static cl::opt<bool>
                 cl::Hidden, cl::init(false), cl::ZeroOrMore,
                 cl::cat(PollyCategory));
 
-static cl::opt<bool, true> XPollyModelPHINodes(
-    "polly-model-phi-nodes",
-    cl::desc("Allow PHI nodes in the input [Unsafe with code-generation!]."),
-    cl::location(PollyModelPHINodes), cl::Hidden, cl::ZeroOrMore,
-    cl::init(true), cl::cat(PollyCategory));
-
-bool polly::PollyModelPHINodes = false;
 bool polly::PollyTrackFailures = false;
 bool polly::PollyDelinearize = false;
 StringRef polly::PollySkipFnAttr = "polly.skip.fn";
@@ -477,11 +470,44 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
     // First step: collect parametric terms in all array references.
     SmallVector<const SCEV *, 4> Terms;
     for (const auto &Pair : Context.Accesses[BasePointer]) {
-      const SCEVAddRecExpr *AccessFunction =
-          dyn_cast<SCEVAddRecExpr>(Pair.second);
+      if (auto *AF = dyn_cast<SCEVAddRecExpr>(Pair.second))
+        SE->collectParametricTerms(AF, Terms);
 
-      if (AccessFunction)
-        AccessFunction->collectParametricTerms(*SE, Terms);
+      // In case the outermost expression is a plain add, we check if any of its
+      // terms has the form 4 * %inst * %param * %param ..., aka a term that
+      // contains a product between a parameter and an instruction that is
+      // inside the scop. Such instructions, if allowed at all, are instructions
+      // SCEV can not represent, but Polly is still looking through. As a
+      // result, these instructions can depend on induction variables and are
+      // most likely no array sizes. However, terms that are multiplied with
+      // them are likely candidates for array sizes.
+      if (auto *AF = dyn_cast<SCEVAddExpr>(Pair.second)) {
+        for (auto Op : AF->operands()) {
+          if (auto *AF2 = dyn_cast<SCEVAddRecExpr>(Op))
+            SE->collectParametricTerms(AF2, Terms);
+          if (auto *AF2 = dyn_cast<SCEVMulExpr>(Op)) {
+            SmallVector<const SCEV *, 0> Operands;
+            bool TermsHasInRegionInst = false;
+
+            for (auto *MulOp : AF2->operands()) {
+              if (auto *Const = dyn_cast<SCEVConstant>(MulOp))
+                Operands.push_back(Const);
+              if (auto *Unknown = dyn_cast<SCEVUnknown>(MulOp)) {
+                if (auto *Inst = dyn_cast<Instruction>(Unknown->getValue())) {
+                  if (!Context.CurRegion.contains(Inst))
+                    Operands.push_back(MulOp);
+                  else
+                    TermsHasInRegionInst = true;
+
+                } else {
+                  Operands.push_back(MulOp);
+                }
+              }
+            }
+            Terms.push_back(SE->getMulExpr(Operands));
+          }
+        }
+      }
     }
 
     // Second step: find array shape.
@@ -525,7 +551,7 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
     MapInsnToMemAcc TempMemoryAccesses;
     for (const auto &Pair : Context.Accesses[BasePointer]) {
       const Instruction *Insn = Pair.first;
-      const SCEVAddRecExpr *AF = dyn_cast<SCEVAddRecExpr>(Pair.second);
+      auto *AF = Pair.second;
       bool IsNonAffine = false;
       TempMemoryAccesses.insert(std::make_pair(Insn, MemAcc(Insn, Shape)));
       MemAcc *Acc = &TempMemoryAccesses.find(Insn)->second;
@@ -536,7 +562,7 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
         else
           IsNonAffine = true;
       } else {
-        AF->computeAccessFunctions(*SE, Acc->DelinearizedSubscripts,
+        SE->computeAccessFunctions(AF, Acc->DelinearizedSubscripts,
                                    Shape->DelinearizedSizes);
         if (Acc->DelinearizedSubscripts.size() == 0)
           IsNonAffine = true;
@@ -669,11 +695,6 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
 
 bool ScopDetection::isValidInstruction(Instruction &Inst,
                                        DetectionContext &Context) const {
-  if (PHINode *PN = dyn_cast<PHINode>(&Inst))
-    if (!PollyModelPHINodes && !canSynthesize(PN, LI, SE, &Context.CurRegion)) {
-      return invalid<ReportPhiNodeRefInRegion>(Context, /*Assert=*/true, &Inst);
-    }
-
   // We only check the call instruction but not invoke instruction.
   if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
     if (isValidCallInst(*CI))
