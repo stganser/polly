@@ -75,9 +75,12 @@ if (CMAKE_COMPILER_IS_GNUCXX)
   # FIXME: Turn off exceptions, RTTI:
   # -fno-exceptions -fno-rtti
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-common -Woverloaded-virtual -Wno-long-long -Wall -W -Wno-unused-parameter -Wwrite-strings -fno-exceptions -fno-rtti")
+elseif (MSVC)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHs-c-")
+  add_definitions("-D_HAS_EXCEPTIONS=0")
+else ()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti")
 endif ()
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti")
 
 # Define the FLAGS for the compilation of isl and imath
 #
@@ -139,7 +142,6 @@ install(DIRECTORY ${POLLY_BINARY_DIR}/include/
 
 add_definitions( -D_GNU_SOURCE )
 
-add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(test)
 add_subdirectory(tools)
@@ -160,10 +162,12 @@ add_custom_command( OUTPUT formatting COMMAND
   CLANG_FORMAT=${LLVM_BINARY_DIR}/bin/clang-format
   ${CMAKE_CURRENT_SOURCE_DIR}/utils/check_format.sh ${files})
 add_custom_target(polly-check-format DEPENDS formatting)
+set_target_properties(polly-check-format PROPERTIES FOLDER "Polly")
 add_custom_command( OUTPUT formatting-update COMMAND
   CLANG_FORMAT=${LLVM_BINARY_DIR}/bin/clang-format
   ${CMAKE_CURRENT_SOURCE_DIR}/utils/update_format.sh ${files})
 add_custom_target(polly-update-format DEPENDS formatting-update)
+set_target_properties(polly-update-format PROPERTIES FOLDER "Polly")
 
 # Set the variable POLLY_LINK_LIBS in the llvm/tools/ dir.
 set(POLLY_LINK_LIBS ${POLLY_LINK_LIBS} PARENT_SCOPE)

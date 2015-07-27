@@ -275,6 +275,7 @@ registerPollyLoopOptimizerEndPasses(const llvm::PassManagerBuilder &Builder,
   if (PassPosition != POSITION_AFTER_LOOPOPT)
     return;
 
+  PM.add(polly::createCodePreparationPass());
   polly::registerPollyPasses(PM);
   // TODO: Add some cleanup passes
 }
@@ -288,6 +289,7 @@ registerPollyScalarOptimizerLatePasses(const llvm::PassManagerBuilder &Builder,
   if (PassPosition != POSITION_BEFORE_VECTORIZER)
     return;
 
+  PM.add(polly::createCodePreparationPass());
   polly::registerPollyPasses(PM);
   // TODO: Add some cleanup passes
 }
