@@ -35,7 +35,7 @@ declare void @llvm.dbg.value(metadata, i64, metadata, metadata)
 !llvm.module.flags = !{!15, !16}
 !llvm.ident = !{!17}
 
-!0 = !DICompileUnit(language: DW_LANG_C99, producer: "clang version 3.6.0 ", isOptimized: true, emissionKind: 1, file: !1, enums: !2, retainedTypes: !2, subprograms: !3, globals: !12, imports: !2)
+!0 = distinct !DICompileUnit(language: DW_LANG_C99, producer: "clang version 3.6.0 ", isOptimized: true, emissionKind: 1, file: !1, enums: !2, retainedTypes: !2, subprograms: !3, globals: !12, imports: !2)
 !1 = !DIFile(filename: "t2.c", directory: "/local/mnt/workspace/build/tip-Release")
 !2 = !{}
 !3 = !{!4}
@@ -44,7 +44,7 @@ declare void @llvm.dbg.value(metadata, i64, metadata, metadata)
 !6 = !DISubroutineType(types: !7)
 !7 = !{null}
 !8 = !{!9}
-!9 = !DILocalVariable(tag: DW_TAG_auto_variable, name: "i", line: 4, scope: !10, file: !5, type: !11)
+!9 = !DILocalVariable(name: "i", line: 4, scope: !10, file: !5, type: !11)
 !10 = distinct !DILexicalBlock(line: 4, column: 3, file: !1, scope: !4)
 !11 = !DIBasicType(tag: DW_TAG_base_type, name: "int", size: 32, align: 32, encoding: DW_ATE_signed)
 !12 = !{!13}

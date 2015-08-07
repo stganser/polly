@@ -198,8 +198,6 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
   if (PollyDetectOnly)
     return;
 
-  PM.add(polly::createScopInfoPass());
-
   if (PollyViewer)
     PM.add(polly::createDOTViewerPass());
   if (PollyOnlyViewer)
@@ -208,6 +206,8 @@ void registerPollyPasses(llvm::legacy::PassManagerBase &PM) {
     PM.add(polly::createDOTPrinterPass());
   if (PollyOnlyPrinter)
     PM.add(polly::createDOTOnlyPrinterPass());
+
+  PM.add(polly::createScopInfoPass());
 
   if (ImportJScop)
     PM.add(polly::createJSONImporterPass());

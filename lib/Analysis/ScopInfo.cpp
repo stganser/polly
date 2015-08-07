@@ -350,10 +350,12 @@ static __isl_give isl_set *addRangeBoundsToSet(__isl_take isl_set *S,
 }
 
 ScopArrayInfo::ScopArrayInfo(Value *BasePtr, Type *ElementType, isl_ctx *Ctx,
-                             const SmallVector<const SCEV *, 4> &DimensionSizes)
+                             const SmallVector<const SCEV *, 4> &DimensionSizes,
+                             bool IsPHI)
     : BasePtr(BasePtr), ElementType(ElementType),
-      DimensionSizes(DimensionSizes) {
-  const std::string BasePtrName = getIslCompatibleName("MemRef_", BasePtr, "");
+      DimensionSizes(DimensionSizes), IsPHI(IsPHI) {
+  std::string BasePtrName =
+      getIslCompatibleName("MemRef_", BasePtr, IsPHI ? "__phi" : "");
   Id = isl_id_alloc(Ctx, BasePtrName.c_str(), this);
 }
 
@@ -668,7 +670,7 @@ MemoryAccess::MemoryAccess(const IRAccess &Access, Instruction *AccInst,
 
   isl_id *BaseAddrId = SAI->getBasePtrId();
 
-  auto IdName = "__polly_array_ref_ " + std::to_string(Identifier);
+  auto IdName = "__polly_array_ref_" + std::to_string(Identifier);
   Id = isl_id_alloc(Ctx, IdName.c_str(), nullptr);
 
   if (!Access.isAffine()) {
@@ -878,6 +880,18 @@ void ScopStmt::restrictDomain(__isl_take isl_set *NewDomain) {
   Domain = NewDomain;
 }
 
+// @brief Get the data-type of the elements accessed
+static Type *getAccessType(IRAccess &Access, Instruction *AccessInst) {
+  if (Access.isPHI())
+    return Access.getBase()->getType();
+
+  if (StoreInst *Store = dyn_cast<StoreInst>(AccessInst))
+    return Store->getValueOperand()->getType();
+  if (BranchInst *Branch = dyn_cast<BranchInst>(AccessInst))
+    return Branch->getCondition()->getType();
+  return AccessInst->getType();
+}
+
 void ScopStmt::buildAccesses(TempScop &tempScop, BasicBlock *Block,
                              bool isApproximated) {
   AccFuncSetType *AFS = tempScop.getAccessFunctions(Block);
@@ -887,10 +901,10 @@ void ScopStmt::buildAccesses(TempScop &tempScop, BasicBlock *Block,
   for (auto &AccessPair : *AFS) {
     IRAccess &Access = AccessPair.first;
     Instruction *AccessInst = AccessPair.second;
+    Type *ElementType = getAccessType(Access, AccessInst);
 
-    Type *ElementType = getAccessInstType(AccessInst);
     const ScopArrayInfo *SAI = getParent()->getOrCreateScopArrayInfo(
-        Access.getBase(), ElementType, Access.Sizes);
+        Access.getBase(), ElementType, Access.Sizes, Access.isPHI());
 
     if (isApproximated && Access.isWrite())
       Access.setMayWrite();
@@ -1662,19 +1676,20 @@ static unsigned getMaxLoopDepthInRegion(const Region &R, LoopInfo &LI,
   return MaxLD - MinLD + 1;
 }
 
-Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
-           ScopDetection &SD, isl_ctx *Context)
-    : SE(&ScalarEvolution), R(tempScop.getMaxRegion()), IsOptimized(false),
-      MaxLoopDepth(getMaxLoopDepthInRegion(tempScop.getMaxRegion(), LI, SD)) {
-  IslCtx = Context;
+Scop::Scop(Region &R, ScalarEvolution &ScalarEvolution, isl_ctx *Context,
+           unsigned MaxLoopDepth)
+    : SE(&ScalarEvolution), R(R), IsOptimized(false),
+      MaxLoopDepth(MaxLoopDepth), IslCtx(Context) {}
 
+void Scop::initFromTempScop(TempScop &TempScop, LoopInfo &LI,
+                            ScopDetection &SD) {
   buildContext();
 
   SmallVector<Loop *, 8> NestLoops;
 
   // Build the iteration domain, access functions and schedule functions
   // traversing the region tree.
-  Schedule = buildScop(tempScop, getRegion(), NestLoops, LI, SD);
+  Schedule = buildScop(TempScop, getRegion(), NestLoops, LI, SD);
   if (!Schedule)
     Schedule = isl_schedule_empty(getParamSpace());
 
@@ -1683,6 +1698,16 @@ Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
   simplifyAssumedContext();
 
   assert(NestLoops.empty() && "NestLoops not empty at top level!");
+}
+
+Scop *Scop::createFromTempScop(TempScop &TempScop, LoopInfo &LI,
+                               ScalarEvolution &SE, ScopDetection &SD,
+                               isl_ctx *ctx) {
+  auto &R = TempScop.getMaxRegion();
+  auto MaxLoopDepth = getMaxLoopDepthInRegion(R, LI, SD);
+  auto S = new Scop(R, SE, ctx, MaxLoopDepth);
+  S->initFromTempScop(TempScop, LI, SD);
+  return S;
 }
 
 Scop::~Scop() {
@@ -1705,15 +1730,17 @@ Scop::~Scop() {
 
 const ScopArrayInfo *
 Scop::getOrCreateScopArrayInfo(Value *BasePtr, Type *AccessType,
-                               const SmallVector<const SCEV *, 4> &Sizes) {
-  auto &SAI = ScopArrayInfoMap[BasePtr];
+                               const SmallVector<const SCEV *, 4> &Sizes,
+                               bool IsPHI) {
+  auto &SAI = ScopArrayInfoMap[std::make_pair(BasePtr, IsPHI)];
   if (!SAI)
-    SAI.reset(new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Sizes));
+    SAI.reset(
+        new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Sizes, IsPHI));
   return SAI.get();
 }
 
-const ScopArrayInfo *Scop::getScopArrayInfo(Value *BasePtr) {
-  const ScopArrayInfo *SAI = ScopArrayInfoMap[BasePtr].get();
+const ScopArrayInfo *Scop::getScopArrayInfo(Value *BasePtr, bool IsPHI) {
+  auto *SAI = ScopArrayInfoMap[std::make_pair(BasePtr, IsPHI)].get();
   assert(SAI && "No ScopArrayInfo available for this base pointer");
   return SAI;
 }
@@ -2161,7 +2188,7 @@ bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
     return false;
   }
 
-  scop = new Scop(*tempScop, LI, SE, SD, ctx);
+  scop = Scop::createFromTempScop(*tempScop, LI, SE, SD, ctx);
 
   DEBUG(scop->print(dbgs()));
 
