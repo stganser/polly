@@ -127,8 +127,6 @@ struct IndependentBlocks : public FunctionPass {
   bool isIndependentBlock(const Region *R, BasicBlock *BB) const;
   bool areAllBlocksIndependent(const Region *R) const;
 
-  // Split the exit block to hold load instructions.
-  bool splitExitBlock(Region *R);
   bool onlyUsedInRegion(Instruction *Inst, const Region *R);
   bool translateScalarToArray(BasicBlock *BB, const Region *R);
   bool translateScalarToArray(Instruction *Inst, const Region *R);
@@ -316,34 +314,6 @@ bool IndependentBlocks::isEscapeOperand(const Value *Operand,
 
   // A value from a different BB is used in the same region.
   return R->contains(OpInst) && (OpInst->getParent() != CurBB);
-}
-
-bool IndependentBlocks::splitExitBlock(Region *R) {
-  // Split the exit BB to place the load instruction of escaped users.
-  BasicBlock *ExitBB = R->getExit();
-  Region *ExitRegion = RI->getRegionFor(ExitBB);
-
-  if (ExitBB != ExitRegion->getEntry())
-    return false;
-
-  BasicBlock *NewExit = createSingleExitEdge(R, this);
-
-  std::vector<Region *> toUpdate;
-  toUpdate.push_back(R);
-
-  while (!toUpdate.empty()) {
-    Region *R = toUpdate.back();
-    toUpdate.pop_back();
-
-    for (auto &&SubRegion : *R)
-      if (SubRegion->getExit() == ExitBB)
-        toUpdate.push_back(SubRegion.get());
-
-    R->replaceExit(NewExit);
-  }
-
-  RI->setRegionFor(NewExit, R->getParent());
-  return true;
 }
 
 bool IndependentBlocks::translateScalarToArray(const Region *R) {

@@ -25,6 +25,7 @@
 #include "llvm/Analysis/RegionPass.h"
 #include "isl/ctx.h"
 
+#include <list>
 #include <forward_list>
 #include <deque>
 
@@ -752,7 +753,7 @@ private:
   /// Max loop depth.
   unsigned MaxLoopDepth;
 
-  typedef std::deque<ScopStmt> StmtSet;
+  typedef std::list<ScopStmt> StmtSet;
   /// The statements in this Scop.
   StmtSet Stmts;
 
@@ -887,6 +888,20 @@ private:
   ScopStmt *addScopStmt(BasicBlock *BB, Region *R, TempScop &tempScop,
                         const Region &CurRegion,
                         SmallVectorImpl<Loop *> &NestLoops);
+
+  /// @brief Create the ScopStmt for a BasicBlock and return its schedule.
+  ///
+  /// Returns null if the BB is trivial and no stmt has been created.
+  ///
+  /// @param BB         The basic block we build the statement for.
+  /// @param tempScop   The temp SCoP we use as model.
+  /// @param CurRegion  The SCoP region.
+  /// @param NestLoops  A vector of all surrounding loops.
+  ///
+  /// @return The ScopStmt's schedule.
+  __isl_give isl_schedule *buildBBScopStmt(BasicBlock *BB, TempScop &tempScop,
+                                           const Region &CurRegion,
+                                           SmallVectorImpl<Loop *> &NestLoops);
 
   /// @brief Build Scop and ScopStmts from a given TempScop.
   ///
