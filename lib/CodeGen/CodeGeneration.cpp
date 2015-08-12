@@ -53,6 +53,7 @@ public:
   IslAstInfo *AI;
   DominatorTree *DT;
   ScalarEvolution *SE;
+  RegionInfo *RI;
   ///}
 
   /// @brief The loop annotator to generate llvm.loop metadata.
@@ -91,6 +92,18 @@ public:
     return true;
   }
 
+  // CodeGeneration adds a lot of BBs without updating the RegionInfo
+  // We make all created BBs belong to the scop's parent region without any
+  // nested structure to keep the RegionInfo verifier happy.
+  void fixRegionInfo(Function *F, Region *ParentRegion) {
+    for (BasicBlock &BB : *F) {
+      if (RI->getRegionFor(&BB))
+        continue;
+
+      RI->setRegionFor(&BB, ParentRegion);
+    }
+  }
+
   bool runOnScop(Scop &S) override {
     AI = &getAnalysis<IslAstInfo>();
 
@@ -103,13 +116,16 @@ public:
     DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     SE = &getAnalysis<ScalarEvolution>();
     DL = &S.getRegion().getEntry()->getParent()->getParent()->getDataLayout();
-
-    assert(!S.getRegion().isTopLevelRegion() &&
-           "Top level regions are not supported");
+    RI = &getAnalysis<RegionInfoPass>().getRegionInfo();
+    Region *R = &S.getRegion();
+    assert(!R->isTopLevelRegion() && "Top level regions are not supported");
 
     Annotator.buildAliasScopes(S);
 
-    BasicBlock *EnteringBB = simplifyRegion(&S, this);
+    simplifyRegion(R, DT, LI, RI);
+    assert(R->isSimple());
+    BasicBlock *EnteringBB = S.getRegion().getEnteringBlock();
+    assert(EnteringBB);
     PollyIRBuilder Builder = createPollyIRBuilder(EnteringBB, Annotator);
 
     IslNodeBuilder NodeBuilder(Builder, Annotator, this, *DL, *LI, *SE, *DT, S);
@@ -132,6 +148,7 @@ public:
     NodeBuilder.create(AstRoot);
 
     NodeBuilder.finalizeSCoP(S);
+    fixRegionInfo(EnteringBB->getParent(), R->getParent());
 
     assert(!verifyGeneratedFunction(S, *EnteringBB->getParent()) &&
            "Verification of generated function failed");

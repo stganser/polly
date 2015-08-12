@@ -286,6 +286,7 @@ add_polly_library(Polly
   Exchange/JSONExporter.cpp
   Exchange/LetseeExporter.cpp
   Support/GICHelper.cpp
+  Support/SCEVAffinator.cpp
   Support/SCEVValidator.cpp
   Support/RegisterPasses.cpp
   Support/ScopHelper.cpp
