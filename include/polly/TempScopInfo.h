@@ -33,6 +33,7 @@ namespace polly {
 class IRAccess {
 public:
   Value *BaseAddress;
+  Value *AccessValue;
 
   const SCEV *Offset;
 
@@ -58,21 +59,24 @@ public:
   ///
   /// @param IsPHI Are we modeling special PHI node accesses?
   explicit IRAccess(TypeKind Type, Value *BaseAddress, const SCEV *Offset,
-                    unsigned elemBytes, bool Affine, bool IsPHI = false)
-      : BaseAddress(BaseAddress), Offset(Offset), ElemBytes(elemBytes),
-        Type(Type), IsAffine(Affine), IsPHI(IsPHI) {}
+                    unsigned elemBytes, bool Affine, Value *AccessValue,
+                    bool IsPHI = false)
+      : BaseAddress(BaseAddress), AccessValue(AccessValue), Offset(Offset),
+        ElemBytes(elemBytes), Type(Type), IsAffine(Affine), IsPHI(IsPHI) {}
 
   explicit IRAccess(TypeKind Type, Value *BaseAddress, const SCEV *Offset,
                     unsigned elemBytes, bool Affine,
                     SmallVector<const SCEV *, 4> Subscripts,
-                    SmallVector<const SCEV *, 4> Sizes)
-      : BaseAddress(BaseAddress), Offset(Offset), ElemBytes(elemBytes),
-        Type(Type), IsAffine(Affine), IsPHI(false), Subscripts(Subscripts),
-        Sizes(Sizes) {}
+                    SmallVector<const SCEV *, 4> Sizes, Value *AccessValue)
+      : BaseAddress(BaseAddress), AccessValue(AccessValue), Offset(Offset),
+        ElemBytes(elemBytes), Type(Type), IsAffine(Affine), IsPHI(false),
+        Subscripts(Subscripts), Sizes(Sizes) {}
 
   enum TypeKind getType() const { return Type; }
 
   Value *getBase() const { return BaseAddress; }
+
+  Value *getAccessValue() const { return AccessValue; }
 
   const SCEV *getOffset() const { return Offset; }
 
@@ -206,7 +210,7 @@ typedef std::map<const Region *, TempScop *> TempScopMapType;
 /// @brief The Function Pass to extract temporary information for Static control
 ///        part in llvm function.
 ///
-class TempScopInfo : public FunctionPass {
+class TempScopInfo : public RegionPass {
   //===-------------------------------------------------------------------===//
   TempScopInfo(const TempScopInfo &) = delete;
   const TempScopInfo &operator=(const TempScopInfo &) = delete;
@@ -240,8 +244,8 @@ class TempScopInfo : public FunctionPass {
   // zero scev every time when we need it.
   const SCEV *ZeroOffset;
 
-  // Mapping regions to the corresponding Scop in current function.
-  TempScopMapType TempScops;
+  // The TempScop for this region.
+  TempScop *TempScopOfRegion;
 
   // Clear the context.
   void clear();
@@ -254,10 +258,6 @@ class TempScopInfo : public FunctionPass {
 
   // Build the affine function of the given condition
   Comparison buildAffineCondition(Value &V, bool inverted);
-
-  // Return the temporary Scop information of Region R, where R must be a valid
-  // part of Scop
-  TempScop *getTempScop(Region &R);
 
   // Build the temprory information of Region R, where R must be a valid part
   // of Scop.
@@ -312,20 +312,19 @@ class TempScopInfo : public FunctionPass {
 
 public:
   static char ID;
-  explicit TempScopInfo() : FunctionPass(ID) {}
+  explicit TempScopInfo() : RegionPass(ID), TempScopOfRegion(nullptr) {}
   ~TempScopInfo();
 
-  /// @brief Get the temporay Scop information in LLVM IR represent
-  ///        for Region R.
+  /// @brief Get the temporay Scop information in LLVM IR for this region.
   ///
   /// @return The Scop information in LLVM IR represent.
-  TempScop *getTempScop(const Region *R) const;
+  TempScop *getTempScop() const;
 
-  /// @name FunctionPass interface
+  /// @name RegionPass interface
   //@{
   virtual void getAnalysisUsage(AnalysisUsage &AU) const;
   virtual void releaseMemory() { clear(); }
-  virtual bool runOnFunction(Function &F);
+  virtual bool runOnRegion(Region *R, RGPassManager &RGM);
   virtual void print(raw_ostream &OS, const Module *) const;
   //@}
 };

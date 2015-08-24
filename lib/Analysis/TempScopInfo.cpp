@@ -135,9 +135,10 @@ void TempScopInfo::buildPHIAccesses(PHINode *PHI, Region &R,
       // we have to insert a scalar dependence from the definition of OpI to
       // OpBB if the definition is not in OpBB.
       if (OpIBB != OpBB) {
-        IRAccess ScalarRead(IRAccess::READ, OpI, ZeroOffset, 1, true);
+        IRAccess ScalarRead(IRAccess::READ, OpI, ZeroOffset, 1, true, OpI);
         AccFuncMap[OpBB].push_back(std::make_pair(ScalarRead, PHI));
-        IRAccess ScalarWrite(IRAccess::MUST_WRITE, OpI, ZeroOffset, 1, true);
+        IRAccess ScalarWrite(IRAccess::MUST_WRITE, OpI, ZeroOffset, 1, true,
+                             OpI);
         AccFuncMap[OpIBB].push_back(std::make_pair(ScalarWrite, OpI));
       }
     }
@@ -147,13 +148,13 @@ void TempScopInfo::buildPHIAccesses(PHINode *PHI, Region &R,
     if (!OpI)
       OpI = OpBB->getTerminator();
 
-    IRAccess ScalarAccess(IRAccess::MUST_WRITE, PHI, ZeroOffset, 1, true,
+    IRAccess ScalarAccess(IRAccess::MUST_WRITE, PHI, ZeroOffset, 1, true, Op,
                           /* IsPHI */ true);
     AccFuncMap[OpBB].push_back(std::make_pair(ScalarAccess, OpI));
   }
 
   if (!OnlyNonAffineSubRegionOperands) {
-    IRAccess ScalarAccess(IRAccess::READ, PHI, ZeroOffset, 1, true,
+    IRAccess ScalarAccess(IRAccess::READ, PHI, ZeroOffset, 1, true, PHI,
                           /* IsPHI */ true);
     Functions.push_back(std::make_pair(ScalarAccess, PHI));
   }
@@ -211,7 +212,7 @@ bool TempScopInfo::buildScalarDependences(Instruction *Inst, Region *R,
     // Do not build a read access that is not in the current SCoP
     // Use the def instruction as base address of the IRAccess, so that it will
     // become the name of the scalar access in the polyhedral form.
-    IRAccess ScalarAccess(IRAccess::READ, Inst, ZeroOffset, 1, true);
+    IRAccess ScalarAccess(IRAccess::READ, Inst, ZeroOffset, 1, true, Inst);
     AccFuncMap[UseParent].push_back(std::make_pair(ScalarAccess, UI));
   }
 
@@ -224,7 +225,7 @@ bool TempScopInfo::buildScalarDependences(Instruction *Inst, Region *R,
         if (R->contains(OpInst))
           continue;
 
-      IRAccess ScalarAccess(IRAccess::READ, Op, ZeroOffset, 1, true);
+      IRAccess ScalarAccess(IRAccess::READ, Op, ZeroOffset, 1, true, Op);
       AccFuncMap[Inst->getParent()].push_back(
           std::make_pair(ScalarAccess, Inst));
     }
@@ -240,17 +241,20 @@ TempScopInfo::buildIRAccess(Instruction *Inst, Loop *L, Region *R,
                             const ScopDetection::BoxedLoopsSetTy *BoxedLoops) {
   unsigned Size;
   Type *SizeType;
+  Value *Val;
   enum IRAccess::TypeKind Type;
 
   if (LoadInst *Load = dyn_cast<LoadInst>(Inst)) {
     SizeType = Load->getType();
     Size = TD->getTypeStoreSize(SizeType);
     Type = IRAccess::READ;
+    Val = Load;
   } else {
     StoreInst *Store = cast<StoreInst>(Inst);
     SizeType = Store->getValueOperand()->getType();
     Size = TD->getTypeStoreSize(SizeType);
     Type = IRAccess::MUST_WRITE;
+    Val = Store->getValueOperand();
   }
 
   const SCEV *AccessFunction = SE->getSCEVAtScope(getPointerOperand(*Inst), L);
@@ -264,7 +268,7 @@ TempScopInfo::buildIRAccess(Instruction *Inst, Loop *L, Region *R,
   if (PollyDelinearize && AccItr != InsnToMemAcc.end())
     return IRAccess(Type, BasePointer->getValue(), AccessFunction, Size, true,
                     AccItr->second.DelinearizedSubscripts,
-                    AccItr->second.Shape->DelinearizedSizes);
+                    AccItr->second.Shape->DelinearizedSizes, Val);
 
   // Check if the access depends on a loop contained in a non-affine subregion.
   bool isVariantInNonAffineLoop = false;
@@ -287,7 +291,7 @@ TempScopInfo::buildIRAccess(Instruction *Inst, Loop *L, Region *R,
     Type = IRAccess::MAY_WRITE;
 
   return IRAccess(Type, BasePointer->getValue(), AccessFunction, Size, IsAffine,
-                  Subscripts, Sizes);
+                  Subscripts, Sizes, Val);
 }
 
 void TempScopInfo::buildAccessFunctions(Region &R, Region &SR) {
@@ -326,7 +330,8 @@ void TempScopInfo::buildAccessFunctions(Region &R, BasicBlock &BB,
         buildScalarDependences(Inst, &R, NonAffineSubRegion)) {
       // If the Instruction is used outside the statement, we need to build the
       // write access.
-      IRAccess ScalarAccess(IRAccess::MUST_WRITE, Inst, ZeroOffset, 1, true);
+      IRAccess ScalarAccess(IRAccess::MUST_WRITE, Inst, ZeroOffset, 1, true,
+                            Inst);
       Functions.push_back(std::make_pair(ScalarAccess, Inst));
     }
   }
@@ -460,34 +465,30 @@ TempScop *TempScopInfo::buildTempScop(Region &R) {
   return TScop;
 }
 
-TempScop *TempScopInfo::getTempScop(const Region *R) const {
-  TempScopMapType::const_iterator at = TempScops.find(R);
-  return at == TempScops.end() ? 0 : at->second;
-}
+TempScop *TempScopInfo::getTempScop() const { return TempScopOfRegion; }
 
 void TempScopInfo::print(raw_ostream &OS, const Module *) const {
-  for (TempScopMapType::const_iterator I = TempScops.begin(),
-                                       E = TempScops.end();
-       I != E; ++I)
-    I->second->print(OS, SE, LI);
+  if (TempScopOfRegion)
+    TempScopOfRegion->print(OS, SE, LI);
 }
 
-bool TempScopInfo::runOnFunction(Function &F) {
+bool TempScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
+  SD = &getAnalysis<ScopDetection>();
+
+  if (!SD->isMaxRegionInScop(*R))
+    return false;
+
+  Function *F = R->getEntry()->getParent();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   PDT = &getAnalysis<PostDominatorTree>();
-  SE = &getAnalysis<ScalarEvolution>();
+  SE = &getAnalysis<ScalarEvolutionWrapperPass>().getSE();
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-  SD = &getAnalysis<ScopDetection>();
   AA = &getAnalysis<AliasAnalysis>();
-  TD = &F.getParent()->getDataLayout();
-  ZeroOffset = SE->getConstant(TD->getIntPtrType(F.getContext()), 0);
+  TD = &F->getParent()->getDataLayout();
+  ZeroOffset = SE->getConstant(TD->getIntPtrType(F->getContext()), 0);
 
-  for (ScopDetection::iterator I = SD->begin(), E = SD->end(); I != E; ++I) {
-    if (!SD->isMaxRegionInScop(**I))
-      continue;
-    Region *R = const_cast<Region *>(*I);
-    TempScops.insert(std::make_pair(R, buildTempScop(*R)));
-  }
+  assert(!TempScopOfRegion && "Build the TempScop only once");
+  TempScopOfRegion = buildTempScop(*R);
 
   return false;
 }
@@ -496,7 +497,7 @@ void TempScopInfo::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequiredTransitive<DominatorTreeWrapperPass>();
   AU.addRequiredTransitive<PostDominatorTree>();
   AU.addRequiredTransitive<LoopInfoWrapperPass>();
-  AU.addRequiredTransitive<ScalarEvolution>();
+  AU.addRequiredTransitive<ScalarEvolutionWrapperPass>();
   AU.addRequiredTransitive<ScopDetection>();
   AU.addRequiredID(IndependentBlocksID);
   AU.addRequired<AliasAnalysis>();
@@ -508,8 +509,9 @@ TempScopInfo::~TempScopInfo() { clear(); }
 void TempScopInfo::clear() {
   BBConds.clear();
   AccFuncMap.clear();
-  DeleteContainerSeconds(TempScops);
-  TempScops.clear();
+  if (TempScopOfRegion)
+    delete TempScopOfRegion;
+  TempScopOfRegion = nullptr;
 }
 
 //===----------------------------------------------------------------------===//
@@ -526,7 +528,7 @@ INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(PostDominatorTree);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
-INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
+INITIALIZE_PASS_DEPENDENCY(ScalarEvolutionWrapperPass);
 INITIALIZE_PASS_END(TempScopInfo, "polly-analyze-ir",
                     "Polly - Analyse the LLVM-IR in the detected regions",
                     false, false)

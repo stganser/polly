@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The isl code generator interface takes a Scop and generates a isl_ast. This
+// The isl code generator interface takes a Scop and generates an isl_ast. This
 // ist_ast can either be returned directly or it can be pretty printed to
 // stdout.
 //
@@ -16,6 +16,14 @@
 // for (c2 = max(0, ceild(n + m, 2); c2 <= min(511, floord(5 * n, 3)); c2++) {
 //   bb2(c2);
 // }
+//
+// An in-depth discussion of our AST generation approach can be found in:
+//
+// Polyhedral AST generation is more than scanning polyhedra
+// Tobias Grosser, Sven Verdoolaege, Albert Cohen
+// ACM Transations on Programming Languages and Systems (TOPLAS),
+// 37(4), July 2015
+// http://www.grosser.es/#pub-polyhedral-AST-generation
 //
 //===----------------------------------------------------------------------===//
 
@@ -327,9 +335,10 @@ buildCondition(__isl_keep isl_ast_build *Build, const Scop::MinMaxAccessTy *It0,
 
 void IslAst::buildRunCondition(__isl_keep isl_ast_build *Build) {
   // The conditions that need to be checked at run-time for this scop are
-  // available as an isl_set in the AssumedContext from which we can directly
-  // derive a run-time condition.
-  RunCondition = isl_ast_build_expr_from_set(Build, S->getAssumedContext());
+  // available as an isl_set in the runtime check context from which we can
+  // directly derive a run-time condition.
+  RunCondition =
+      isl_ast_build_expr_from_set(Build, S->getRuntimeCheckContext());
 
   // Create the alias checks from the minimal/maximal accesses in each alias
   // group which consists of read only and non read only (read write) accesses.

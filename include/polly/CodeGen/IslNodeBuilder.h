@@ -16,7 +16,6 @@
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/IslExprBuilder.h"
 #include "polly/CodeGen/LoopGenerators.h"
-#include "llvm/Analysis/ScalarEvolutionExpander.h"
 #include "isl/ctx.h"
 #include "isl/union_map.h"
 
@@ -30,8 +29,8 @@ public:
   IslNodeBuilder(PollyIRBuilder &Builder, ScopAnnotator &Annotator, Pass *P,
                  const DataLayout &DL, LoopInfo &LI, ScalarEvolution &SE,
                  DominatorTree &DT, Scop &S)
-      : S(S), Builder(Builder), Annotator(Annotator), Rewriter(SE, DL, "polly"),
-        ExprBuilder(Builder, IDToValue, Rewriter, DT, LI),
+      : S(S), Builder(Builder), Annotator(Annotator),
+        ExprBuilder(S, Builder, IDToValue, DL, SE, DT, LI),
         BlockGen(Builder, LI, SE, DT, ScalarMap, PHIOpMap, EscapeMap,
                  &ExprBuilder),
         RegionGen(BlockGen), P(P), DL(DL), LI(LI), SE(SE), DT(DT) {}
@@ -52,9 +51,6 @@ private:
   Scop &S;
   PollyIRBuilder &Builder;
   ScopAnnotator &Annotator;
-
-  /// @brief A SCEVExpander to create llvm values from SCEVs.
-  SCEVExpander Rewriter;
 
   IslExprBuilder ExprBuilder;
 
@@ -133,7 +129,16 @@ private:
   __isl_give isl_ast_expr *getUpperBound(__isl_keep isl_ast_node *For,
                                          CmpInst::Predicate &Predicate);
 
-  unsigned getNumberOfIterations(__isl_keep isl_ast_node *For);
+  /// Return non-negative number of iterations in case of the following form
+  /// of a loop and -1 otherwise.
+  ///
+  /// for (i = 0; i <= NumIter; i++) {
+  ///   loop body;
+  /// }
+  ///
+  /// NumIter is a non-negative integer value. Condition can have
+  /// isl_ast_op_lt type.
+  int getNumberOfIterations(__isl_keep isl_ast_node *For);
 
   /// Compute the values and loops referenced in this subtree.
   ///
@@ -169,6 +174,14 @@ private:
   /// @param NewValues A map that maps certain llvm::Values to new llvm::Values.
   void updateValues(ParallelLoopGenerator::ValueToValueMapTy &NewValues);
 
+  /// @brief Generate code for a marker now.
+  ///
+  /// For mark nodes with an unknown name, we just forward the code generation
+  /// to its child. This is currently the only behavior implemented, as there is
+  /// currently not special handling for marker nodes implemented.
+  ///
+  /// @param Mark The node we generate code for.
+  void createMark(__isl_take isl_ast_node *Marker);
   void createFor(__isl_take isl_ast_node *For);
   void createForVector(__isl_take isl_ast_node *For, int VectorWidth);
   void createForSequential(__isl_take isl_ast_node *For);

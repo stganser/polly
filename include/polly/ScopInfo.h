@@ -25,6 +25,7 @@
 
 #include "llvm/ADT/MapVector.h"
 #include "llvm/Analysis/RegionPass.h"
+#include "isl/aff.h"
 #include "isl/ctx.h"
 
 #include <forward_list>
@@ -80,8 +81,10 @@ public:
   /// @param IslCtx         The isl context used to create the base pointer id.
   /// @param DimensionSizes A vector containing the size of each dimension.
   /// @param IsPHI          Is this a PHI node specific array info object.
+  /// @param S              The scop this array object belongs to.
   ScopArrayInfo(Value *BasePtr, Type *ElementType, isl_ctx *IslCtx,
-                const SmallVector<const SCEV *, 4> &DimensionSizes, bool IsPHI);
+                const SmallVector<const SCEV *, 4> &DimensionSizes, bool IsPHI,
+                Scop *S);
 
   /// @brief Destructor to free the isl id of the base pointer.
   ~ScopArrayInfo();
@@ -89,13 +92,27 @@ public:
   /// @brief Return the base pointer.
   Value *getBasePtr() const { return BasePtr; }
 
+  /// @brief For indirect accesses return the origin SAI of the BP, else null.
+  const ScopArrayInfo *getBasePtrOriginSAI() const { return BasePtrOriginSAI; }
+
+  /// @brief The set of derived indirect SAIs for this origin SAI.
+  const SmallPtrSetImpl<ScopArrayInfo *> &getDerivedSAIs() const {
+    return DerivedSAIs;
+  };
+
   /// @brief Return the number of dimensions.
   unsigned getNumberOfDimensions() const { return DimensionSizes.size(); }
 
-  /// @brief Return the size of dimension @p dim.
+  /// @brief Return the size of dimension @p dim as SCEV*.
   const SCEV *getDimensionSize(unsigned dim) const {
     assert(dim < getNumberOfDimensions() && "Invalid dimension");
     return DimensionSizes[dim];
+  }
+
+  /// @brief Return the size of dimension @p dim as isl_pw_aff.
+  __isl_give isl_pw_aff *getDimensionSizePw(unsigned dim) const {
+    assert(dim < getNumberOfDimensions() && "Invalid dimension");
+    return isl_pw_aff_copy(DimensionSizesPw[dim - 1]);
   }
 
   /// @brief Get the type of the elements stored in this array.
@@ -126,7 +143,9 @@ public:
   void dump() const;
 
   /// @brief Print a readable representation to @p OS.
-  void print(raw_ostream &OS) const;
+  ///
+  /// @param SizeAsPwAff Print the size as isl_pw_aff
+  void print(raw_ostream &OS, bool SizeAsPwAff = false) const;
 
   /// @brief Access the ScopArrayInfo associated with an access function.
   static const ScopArrayInfo *
@@ -136,6 +155,16 @@ public:
   static const ScopArrayInfo *getFromId(__isl_take isl_id *Id);
 
 private:
+  void addDerivedSAI(ScopArrayInfo *DerivedSAI) {
+    DerivedSAIs.insert(DerivedSAI);
+  }
+
+  /// @brief For indirect accesses this is the SAI of the BP origin.
+  const ScopArrayInfo *BasePtrOriginSAI;
+
+  /// @brief For origin SAIs the set of derived indirect SAIs.
+  SmallPtrSet<ScopArrayInfo *, 2> DerivedSAIs;
+
   /// @brief The base pointer.
   Value *BasePtr;
 
@@ -145,8 +174,11 @@ private:
   /// @brief The isl id for the base pointer.
   isl_id *Id;
 
-  /// @brief The sizes of each dimension.
+  /// @brief The sizes of each dimension as SCEV*.
   SmallVector<const SCEV *, 4> DimensionSizes;
+
+  /// @brief The sizes of each dimension as isl_pw_aff.
+  SmallVector<isl_pw_aff *, 4> DimensionSizesPw;
 
   /// @brief Is this PHI node specific storage?
   bool IsPHI;
@@ -230,7 +262,15 @@ private:
   ReductionType RedType = RT_NONE;
 
   /// @brief The access instruction of this memory access.
-  Instruction *Inst;
+  Instruction *AccessInstruction;
+
+  /// @brief The value associated with this memory access.
+  ///
+  ///  - For real memory accesses it is the loaded result or the stored value.
+  ///  - For straigt line scalar accesses it is the access instruction itself.
+  ///  - For PHI operand accesses it is the operand value.
+  ///
+  Value *AccessValue;
 
   /// Updated access relation read from JSCOP file.
   isl_map *newAccessRelation;
@@ -363,8 +403,11 @@ public:
 
   const std::string &getBaseName() const { return BaseName; }
 
+  /// @brief Return the access value of this memory access.
+  Value *getAccessValue() const { return AccessValue; }
+
   /// @brief Return the access instruction of this memory access.
-  Instruction *getAccessInstruction() const { return Inst; }
+  Instruction *getAccessInstruction() const { return AccessInstruction; }
 
   /// Get the stride of this memory access in the specified Schedule. Schedule
   /// is a map from the statement to a schedule where the innermost dimension is
@@ -512,12 +555,9 @@ private:
   /// Build the statement.
   //@{
   __isl_give isl_set *buildConditionSet(const Comparison &Cmp);
-  __isl_give isl_set *addConditionsToDomain(__isl_take isl_set *Domain,
-                                            TempScop &tempScop,
-                                            const Region &CurRegion);
-  __isl_give isl_set *addLoopBoundsToDomain(__isl_take isl_set *Domain,
-                                            TempScop &tempScop);
-  __isl_give isl_set *buildDomain(TempScop &tempScop, const Region &CurRegion);
+  void addConditionsToDomain(TempScop &tempScop, const Region &CurRegion);
+  void addLoopBoundsToDomain(TempScop &tempScop);
+  void buildDomain(TempScop &tempScop, const Region &CurRegion);
 
   /// @brief Create the accesses for instructions in @p Block.
   ///
@@ -855,13 +895,14 @@ private:
   Scop(Region &R, ScalarEvolution &SE, isl_ctx *ctx, unsigned MaxLoopDepth);
 
   /// @brief Initialize this ScopInfo using a TempScop object.
-  void initFromTempScop(TempScop &TempScop, LoopInfo &LI, ScopDetection &SD);
+  void initFromTempScop(TempScop &TempScop, LoopInfo &LI, ScopDetection &SD,
+                        AliasAnalysis &AA);
 
   /// Create the static control part with a region, max loop depth of this
   /// region and parameters used in this region.
   static Scop *createFromTempScop(TempScop &TempScop, LoopInfo &LI,
                                   ScalarEvolution &SE, ScopDetection &SD,
-                                  isl_ctx *ctx);
+                                  AliasAnalysis &AA, isl_ctx *ctx);
 
   /// @brief Check if a basic block is trivial.
   ///
@@ -874,8 +915,14 @@ private:
   /// @return True if the basic block is trivial, otherwise false.
   static bool isTrivialBB(BasicBlock *BB, TempScop &tempScop);
 
+  /// @brief Add parameter constraints to @p C that imply a non-empty domain.
+  __isl_give isl_set *addNonEmptyDomainConstraints(__isl_take isl_set *C) const;
+
   /// @brief Build the Context of the Scop.
   void buildContext();
+
+  /// @brief Add user provided parameter constraints to context.
+  void addUserContext();
 
   /// @brief Add the bounds of the parameters to the context.
   void addParameterBounds();
@@ -1020,6 +1067,22 @@ public:
   /// @return The assumed context of this Scop.
   __isl_give isl_set *getAssumedContext() const;
 
+  /// @brief Get the runtime check context for this Scop.
+  ///
+  /// The runtime check context contains all constraints that have to
+  /// hold at runtime for the optimized version to be executed.
+  ///
+  /// @return The runtime check context of this Scop.
+  __isl_give isl_set *getRuntimeCheckContext() const;
+
+  /// @brief Return true if the optimized SCoP can be executed.
+  ///
+  /// In addition to the runtime check context this will also utilize the domain
+  /// constraints to decide it the optimized version can actually be executed.
+  ///
+  /// @returns True if the optimized SCoP can be executed.
+  bool hasFeasibleRuntimeContext() const;
+
   /// @brief Add assumptions to assumed context.
   ///
   /// The assumptions added will be assumed to hold during the execution of the
@@ -1034,6 +1097,9 @@ public:
   /// @param Set A set describing relations between parameters that are assumed
   ///            to hold.
   void addAssumption(__isl_take isl_set *Set);
+
+  /// @brief Build the alias checks for this SCoP.
+  void buildAliasChecks(AliasAnalysis &AA);
 
   /// @brief Build all alias groups for this SCoP.
   ///
@@ -1112,8 +1178,13 @@ public:
   /// @return The isl context of this static control part.
   isl_ctx *getIslCtx() const;
 
-  /// @brief Compute the isl representation for the SCEV @p E in @p Stmt.
-  __isl_give isl_pw_aff *getPwAff(const SCEV *E, ScopStmt *Stmt);
+  /// @brief Compute the isl representation for the SCEV @p
+  ///
+  ///
+  /// @param Stmt An (optional) statement for which the isl_pw_aff is
+  ///             computed. SCEVs known to not reference any loops in the
+  ///             scop can be passed without a statement.
+  __isl_give isl_pw_aff *getPwAff(const SCEV *E, ScopStmt *Stmt = nullptr);
 
   /// @brief Get a union set containing the iteration domains of all statements.
   __isl_give isl_union_set *getDomains() const;

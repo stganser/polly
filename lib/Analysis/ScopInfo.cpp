@@ -75,6 +75,15 @@ static cl::opt<unsigned> RunTimeChecksMaxArraysPerGroup(
     "polly-rtc-max-arrays-per-group",
     cl::desc("The maximal number of arrays to compare in each alias group."),
     cl::Hidden, cl::ZeroOrMore, cl::init(20), cl::cat(PollyCategory));
+static cl::opt<std::string> UserContextStr(
+    "polly-context", cl::value_desc("isl parameter set"),
+    cl::desc("Provide additional constraints on the context parameters"),
+    cl::init(""), cl::cat(PollyCategory));
+
+static cl::opt<bool> DetectReductions("polly-detect-reductions",
+                                      cl::desc("Detect and exploit reductions"),
+                                      cl::Hidden, cl::ZeroOrMore,
+                                      cl::init(true), cl::cat(PollyCategory));
 
 // Create a sequence of two schedules. Either argument may be null and is
 // interpreted as the empty schedule. Can also return null if both schedules are
@@ -114,17 +123,51 @@ static __isl_give isl_set *addRangeBoundsToSet(__isl_take isl_set *S,
     return isl_set_intersect(SLB, SUB);
 }
 
+static const ScopArrayInfo *identifyBasePtrOriginSAI(Scop *S, Value *BasePtr) {
+  LoadInst *BasePtrLI = dyn_cast<LoadInst>(BasePtr);
+  if (!BasePtrLI)
+    return nullptr;
+
+  if (!S->getRegion().contains(BasePtrLI))
+    return nullptr;
+
+  ScalarEvolution &SE = *S->getSE();
+
+  auto *OriginBaseSCEV =
+      SE.getPointerBase(SE.getSCEV(BasePtrLI->getPointerOperand()));
+  if (!OriginBaseSCEV)
+    return nullptr;
+
+  auto *OriginBaseSCEVUnknown = dyn_cast<SCEVUnknown>(OriginBaseSCEV);
+  if (!OriginBaseSCEVUnknown)
+    return nullptr;
+
+  return S->getScopArrayInfo(OriginBaseSCEVUnknown->getValue());
+}
+
 ScopArrayInfo::ScopArrayInfo(Value *BasePtr, Type *ElementType, isl_ctx *Ctx,
                              const SmallVector<const SCEV *, 4> &DimensionSizes,
-                             bool IsPHI)
+                             bool IsPHI, Scop *S)
     : BasePtr(BasePtr), ElementType(ElementType),
       DimensionSizes(DimensionSizes), IsPHI(IsPHI) {
   std::string BasePtrName =
       getIslCompatibleName("MemRef_", BasePtr, IsPHI ? "__phi" : "");
   Id = isl_id_alloc(Ctx, BasePtrName.c_str(), this);
+  for (const SCEV *Expr : DimensionSizes) {
+    isl_pw_aff *Size = S->getPwAff(Expr);
+    DimensionSizesPw.push_back(Size);
+  }
+
+  BasePtrOriginSAI = identifyBasePtrOriginSAI(S, BasePtr);
+  if (BasePtrOriginSAI)
+    const_cast<ScopArrayInfo *>(BasePtrOriginSAI)->addDerivedSAI(this);
 }
 
-ScopArrayInfo::~ScopArrayInfo() { isl_id_free(Id); }
+ScopArrayInfo::~ScopArrayInfo() {
+  isl_id_free(Id);
+  for (isl_pw_aff *Size : DimensionSizesPw)
+    isl_pw_aff_free(Size);
+}
 
 std::string ScopArrayInfo::getName() const { return isl_id_get_name(Id); }
 
@@ -136,10 +179,22 @@ isl_id *ScopArrayInfo::getBasePtrId() const { return isl_id_copy(Id); }
 
 void ScopArrayInfo::dump() const { print(errs()); }
 
-void ScopArrayInfo::print(raw_ostream &OS) const {
+void ScopArrayInfo::print(raw_ostream &OS, bool SizeAsPwAff) const {
   OS.indent(8) << *getElementType() << " " << getName() << "[*]";
-  for (unsigned u = 0; u < getNumberOfDimensions(); u++)
-    OS << "[" << *DimensionSizes[u] << "]";
+  for (unsigned u = 0; u < getNumberOfDimensions(); u++) {
+    OS << "[";
+
+    if (SizeAsPwAff)
+      OS << " " << DimensionSizesPw[u] << " ";
+    else
+      OS << *DimensionSizes[u];
+
+    OS << "]";
+  }
+
+  if (BasePtrOriginSAI)
+    OS << " [BasePtrOrigin: " << BasePtrOriginSAI->getName() << "]";
+
   OS << " // Element size " << getElemSizeInBytes() << "\n";
 }
 
@@ -426,7 +481,8 @@ __isl_give isl_map *MemoryAccess::foldAccess(const IRAccess &Access,
 MemoryAccess::MemoryAccess(const IRAccess &Access, Instruction *AccInst,
                            ScopStmt *Statement, const ScopArrayInfo *SAI,
                            int Identifier)
-    : AccType(getMemoryAccessType(Access)), Statement(Statement), Inst(AccInst),
+    : AccType(getMemoryAccessType(Access)), Statement(Statement),
+      AccessInstruction(AccInst), AccessValue(Access.getAccessValue()),
       newAccessRelation(nullptr) {
 
   isl_ctx *Ctx = Statement->getIslCtx();
@@ -587,7 +643,7 @@ bool MemoryAccess::isStrideX(__isl_take const isl_map *Schedule,
   Stride = getStride(Schedule);
   StrideX = isl_set_universe(isl_set_get_space(Stride));
   StrideX = isl_set_fix_si(StrideX, isl_dim_set, 0, StrideWidth);
-  IsStrideX = isl_set_is_equal(Stride, StrideX);
+  IsStrideX = isl_set_is_subset(Stride, StrideX);
 
   isl_set_free(StrideX);
   isl_set_free(Stride);
@@ -648,18 +704,6 @@ void ScopStmt::restrictDomain(__isl_take isl_set *NewDomain) {
   Domain = NewDomain;
 }
 
-// @brief Get the data-type of the elements accessed
-static Type *getAccessType(IRAccess &Access, Instruction *AccessInst) {
-  if (Access.isPHI())
-    return Access.getBase()->getType();
-
-  if (StoreInst *Store = dyn_cast<StoreInst>(AccessInst))
-    return Store->getValueOperand()->getType();
-  if (BranchInst *Branch = dyn_cast<BranchInst>(AccessInst))
-    return Branch->getCondition()->getType();
-  return AccessInst->getType();
-}
-
 void ScopStmt::buildAccesses(TempScop &tempScop, BasicBlock *Block,
                              bool isApproximated) {
   AccFuncSetType *AFS = tempScop.getAccessFunctions(Block);
@@ -669,7 +713,7 @@ void ScopStmt::buildAccesses(TempScop &tempScop, BasicBlock *Block,
   for (auto &AccessPair : *AFS) {
     IRAccess &Access = AccessPair.first;
     Instruction *AccessInst = AccessPair.second;
-    Type *ElementType = getAccessType(Access, AccessInst);
+    Type *ElementType = Access.getAccessValue()->getType();
 
     const ScopArrayInfo *SAI = getParent()->getOrCreateScopArrayInfo(
         Access.getBase(), ElementType, Access.Sizes, Access.isPHI());
@@ -722,8 +766,7 @@ __isl_give isl_set *ScopStmt::buildConditionSet(const Comparison &Comp) {
   }
 }
 
-__isl_give isl_set *ScopStmt::addLoopBoundsToDomain(__isl_take isl_set *Domain,
-                                                    TempScop &tempScop) {
+void ScopStmt::addLoopBoundsToDomain(TempScop &tempScop) {
   isl_space *Space;
   isl_local_space *LocalSpace;
 
@@ -749,12 +792,10 @@ __isl_give isl_set *ScopStmt::addLoopBoundsToDomain(__isl_take isl_set *Domain,
   }
 
   isl_local_space_free(LocalSpace);
-  return Domain;
 }
 
-__isl_give isl_set *ScopStmt::addConditionsToDomain(__isl_take isl_set *Domain,
-                                                    TempScop &tempScop,
-                                                    const Region &CurRegion) {
+void ScopStmt::addConditionsToDomain(TempScop &tempScop,
+                                     const Region &CurRegion) {
   const Region *TopRegion = tempScop.getMaxRegion().getParent(),
                *CurrentRegion = &CurRegion;
   const BasicBlock *BranchingBB = BB ? BB : R->getEntry();
@@ -770,14 +811,10 @@ __isl_give isl_set *ScopStmt::addConditionsToDomain(__isl_take isl_set *Domain,
     BranchingBB = CurrentRegion->getEntry();
     CurrentRegion = CurrentRegion->getParent();
   } while (TopRegion != CurrentRegion);
-
-  return Domain;
 }
 
-__isl_give isl_set *ScopStmt::buildDomain(TempScop &tempScop,
-                                          const Region &CurRegion) {
+void ScopStmt::buildDomain(TempScop &tempScop, const Region &CurRegion) {
   isl_space *Space;
-  isl_set *Domain;
   isl_id *Id;
 
   Space = isl_space_set_alloc(getIslCtx(), 0, getNumIterators());
@@ -785,11 +822,9 @@ __isl_give isl_set *ScopStmt::buildDomain(TempScop &tempScop,
   Id = isl_id_alloc(getIslCtx(), getBaseName(), this);
 
   Domain = isl_set_universe(Space);
-  Domain = addLoopBoundsToDomain(Domain, tempScop);
-  Domain = addConditionsToDomain(Domain, tempScop, CurRegion);
+  addLoopBoundsToDomain(tempScop);
+  addConditionsToDomain(tempScop, CurRegion);
   Domain = isl_set_set_tuple_id(Domain, Id);
-
-  return Domain;
 }
 
 void ScopStmt::deriveAssumptionsFromGEP(GetElementPtrInst *GEP) {
@@ -857,14 +892,15 @@ ScopStmt::ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion,
 
   BaseName = getIslCompatibleName("Stmt_", R.getNameStr(), "");
 
-  Domain = buildDomain(tempScop, CurRegion);
+  buildDomain(tempScop, CurRegion);
 
   BasicBlock *EntryBB = R.getEntry();
   for (BasicBlock *Block : R.blocks()) {
     buildAccesses(tempScop, Block, Block != EntryBB);
     deriveAssumptions(Block);
   }
-  checkForReductions();
+  if (DetectReductions)
+    checkForReductions();
 }
 
 ScopStmt::ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion,
@@ -877,10 +913,11 @@ ScopStmt::ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion,
 
   BaseName = getIslCompatibleName("Stmt_", &bb, "");
 
-  Domain = buildDomain(tempScop, CurRegion);
+  buildDomain(tempScop, CurRegion);
   buildAccesses(tempScop, BB);
   deriveAssumptions(BB);
-  checkForReductions();
+  if (DetectReductions)
+    checkForReductions();
 }
 
 /// @brief Collect loads which might form a reduction chain with @p StoreMA
@@ -1112,6 +1149,58 @@ __isl_give isl_id *Scop::getIdForParam(const SCEV *Parameter) const {
                       const_cast<void *>((const void *)Parameter));
 }
 
+isl_set *Scop::addNonEmptyDomainConstraints(isl_set *C) const {
+  isl_set *DomainContext = isl_union_set_params(getDomains());
+  return isl_set_intersect_params(C, DomainContext);
+}
+
+void Scop::addUserContext() {
+  if (UserContextStr.empty())
+    return;
+
+  isl_set *UserContext = isl_set_read_from_str(IslCtx, UserContextStr.c_str());
+  isl_space *Space = getParamSpace();
+  if (isl_space_dim(Space, isl_dim_param) !=
+      isl_set_dim(UserContext, isl_dim_param)) {
+    auto SpaceStr = isl_space_to_str(Space);
+    errs() << "Error: the context provided in -polly-context has not the same "
+           << "number of dimensions than the computed context. Due to this "
+           << "mismatch, the -polly-context option is ignored. Please provide "
+           << "the context in the parameter space: " << SpaceStr << ".\n";
+    free(SpaceStr);
+    isl_set_free(UserContext);
+    isl_space_free(Space);
+    return;
+  }
+
+  for (unsigned i = 0; i < isl_space_dim(Space, isl_dim_param); i++) {
+    auto NameContext = isl_set_get_dim_name(Context, isl_dim_param, i);
+    auto NameUserContext = isl_set_get_dim_name(UserContext, isl_dim_param, i);
+
+    if (strcmp(NameContext, NameUserContext) != 0) {
+      auto SpaceStr = isl_space_to_str(Space);
+      errs() << "Error: the name of dimension " << i
+             << " provided in -polly-context "
+             << "is '" << NameUserContext << "', but the name in the computed "
+             << "context is '" << NameContext
+             << "'. Due to this name mismatch, "
+             << "the -polly-context option is ignored. Please provide "
+             << "the context in the parameter space: " << SpaceStr << ".\n";
+      free(SpaceStr);
+      isl_set_free(UserContext);
+      isl_space_free(Space);
+      return;
+    }
+
+    UserContext =
+        isl_set_set_dim_id(UserContext, isl_dim_param, i,
+                           isl_space_get_dim_id(Space, isl_dim_param, i));
+  }
+
+  Context = isl_set_intersect(Context, UserContext);
+  isl_space_free(Space);
+}
+
 void Scop::buildContext() {
   isl_space *Space = isl_space_params_alloc(IslCtx, 0);
   Context = isl_set_universe(isl_space_copy(Space));
@@ -1250,18 +1339,36 @@ static __isl_give isl_set *getAccessDomain(MemoryAccess *MA) {
 /// @brief Wrapper function to calculate minimal/maximal accesses to each array.
 static bool calculateMinMaxAccess(__isl_take isl_union_map *Accesses,
                                   __isl_take isl_union_set *Domains,
-                                  __isl_take isl_set *AssumedContext,
                                   Scop::MinMaxVectorTy &MinMaxAccesses) {
 
   Accesses = isl_union_map_intersect_domain(Accesses, Domains);
   isl_union_set *Locations = isl_union_map_range(Accesses);
-  Locations = isl_union_set_intersect_params(Locations, AssumedContext);
   Locations = isl_union_set_coalesce(Locations);
   Locations = isl_union_set_detect_equalities(Locations);
   bool Valid = (0 == isl_union_set_foreach_set(Locations, buildMinMaxAccess,
                                                &MinMaxAccesses));
   isl_union_set_free(Locations);
   return Valid;
+}
+
+void Scop::buildAliasChecks(AliasAnalysis &AA) {
+  if (!PollyUseRuntimeAliasChecks)
+    return;
+
+  if (buildAliasGroups(AA))
+    return;
+
+  // If a problem occurs while building the alias groups we need to delete
+  // this SCoP and pretend it wasn't valid in the first place. To this end
+  // we make the assumed context infeasible.
+  addAssumption(isl_set_empty(getParamSpace()));
+
+  DEBUG(dbgs() << "\n\nNOTE: Run time checks for " << getNameStr()
+               << " could not be created as the number of parameters involved "
+                  "is too high. The SCoP will be "
+                  "dismissed.\nUse:\n\t--polly-rtc-max-parameters=X\nto adjust "
+                  "the maximal number of parameters but be advised that the "
+                  "compile time might increase exponentially.\n\n");
 }
 
 bool Scop::buildAliasGroups(AliasAnalysis &AA) {
@@ -1388,8 +1495,8 @@ bool Scop::buildAliasGroups(AliasAnalysis &AA) {
     for (MemoryAccess *MA : AG)
       Accesses = isl_union_map_add_map(Accesses, MA->getAccessRelation());
 
-    bool Valid = calculateMinMaxAccess(
-        Accesses, getDomains(), getAssumedContext(), MinMaxAccessesNonReadOnly);
+    bool Valid = calculateMinMaxAccess(Accesses, getDomains(),
+                                       MinMaxAccessesNonReadOnly);
 
     // Bail out if the number of values we need to compare is too large.
     // This is important as the number of comparisions grows quadratically with
@@ -1406,8 +1513,8 @@ bool Scop::buildAliasGroups(AliasAnalysis &AA) {
       for (MemoryAccess *MA : ReadOnlyPair.second)
         Accesses = isl_union_map_add_map(Accesses, MA->getAccessRelation());
 
-    Valid = calculateMinMaxAccess(Accesses, getDomains(), getAssumedContext(),
-                                  MinMaxAccessesReadOnly);
+    Valid =
+        calculateMinMaxAccess(Accesses, getDomains(), MinMaxAccessesReadOnly);
 
     if (!Valid)
       return false;
@@ -1449,8 +1556,8 @@ Scop::Scop(Region &R, ScalarEvolution &ScalarEvolution, isl_ctx *Context,
     : SE(&ScalarEvolution), R(R), IsOptimized(false),
       MaxLoopDepth(MaxLoopDepth), IslCtx(Context), Affinator(this) {}
 
-void Scop::initFromTempScop(TempScop &TempScop, LoopInfo &LI,
-                            ScopDetection &SD) {
+void Scop::initFromTempScop(TempScop &TempScop, LoopInfo &LI, ScopDetection &SD,
+                            AliasAnalysis &AA) {
   buildContext();
 
   SmallVector<Loop *, 8> NestLoops;
@@ -1463,18 +1570,21 @@ void Scop::initFromTempScop(TempScop &TempScop, LoopInfo &LI,
 
   realignParams();
   addParameterBounds();
+  addUserContext();
   simplifyAssumedContext();
+  buildAliasChecks(AA);
 
   assert(NestLoops.empty() && "NestLoops not empty at top level!");
 }
 
 Scop *Scop::createFromTempScop(TempScop &TempScop, LoopInfo &LI,
                                ScalarEvolution &SE, ScopDetection &SD,
-                               isl_ctx *ctx) {
+                               AliasAnalysis &AA, isl_ctx *ctx) {
   auto &R = TempScop.getMaxRegion();
   auto MaxLoopDepth = getMaxLoopDepthInRegion(R, LI, SD);
   auto S = new Scop(R, SE, ctx, MaxLoopDepth);
-  S->initFromTempScop(TempScop, LI, SD);
+  S->initFromTempScop(TempScop, LI, SD, AA);
+
   return S;
 }
 
@@ -1502,8 +1612,8 @@ Scop::getOrCreateScopArrayInfo(Value *BasePtr, Type *AccessType,
                                bool IsPHI) {
   auto &SAI = ScopArrayInfoMap[std::make_pair(BasePtr, IsPHI)];
   if (!SAI)
-    SAI.reset(
-        new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Sizes, IsPHI));
+    SAI.reset(new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Sizes, IsPHI,
+                                this));
   return SAI.get();
 }
 
@@ -1542,6 +1652,19 @@ __isl_give isl_space *Scop::getParamSpace() const {
 
 __isl_give isl_set *Scop::getAssumedContext() const {
   return isl_set_copy(AssumedContext);
+}
+
+__isl_give isl_set *Scop::getRuntimeCheckContext() const {
+  isl_set *RuntimeCheckContext = getAssumedContext();
+  return RuntimeCheckContext;
+}
+
+bool Scop::hasFeasibleRuntimeContext() const {
+  isl_set *RuntimeCheckContext = getRuntimeCheckContext();
+  RuntimeCheckContext = addNonEmptyDomainConstraints(RuntimeCheckContext);
+  bool IsFeasible = !isl_set_is_empty(RuntimeCheckContext);
+  isl_set_free(RuntimeCheckContext);
+  return IsFeasible;
 }
 
 void Scop::addAssumption(__isl_take isl_set *Set) {
@@ -1626,6 +1749,13 @@ void Scop::printArrayInfo(raw_ostream &OS) const {
 
   for (auto &Array : arrays())
     Array.second->print(OS);
+
+  OS.indent(4) << "}\n";
+
+  OS.indent(4) << "Arrays (Bounds as pw_affs) {\n";
+
+  for (auto &Array : arrays())
+    Array.second->print(OS, /* SizeAsPwAff */ true);
 
   OS.indent(4) << "}\n";
 }
@@ -1940,7 +2070,7 @@ ScopInfo::~ScopInfo() {
 void ScopInfo::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<LoopInfoWrapperPass>();
   AU.addRequired<RegionInfoPass>();
-  AU.addRequired<ScalarEvolution>();
+  AU.addRequired<ScalarEvolutionWrapperPass>();
   AU.addRequired<ScopDetection>();
   AU.addRequired<TempScopInfo>();
   AU.addRequired<AliasAnalysis>();
@@ -1951,9 +2081,9 @@ bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
   LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   AliasAnalysis &AA = getAnalysis<AliasAnalysis>();
   ScopDetection &SD = getAnalysis<ScopDetection>();
-  ScalarEvolution &SE = getAnalysis<ScalarEvolution>();
+  ScalarEvolution &SE = getAnalysis<ScalarEvolutionWrapperPass>().getSE();
 
-  TempScop *tempScop = getAnalysis<TempScopInfo>().getTempScop(R);
+  TempScop *tempScop = getAnalysis<TempScopInfo>().getTempScop();
 
   // This region is no Scop.
   if (!tempScop) {
@@ -1961,38 +2091,20 @@ bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
     return false;
   }
 
-  scop = Scop::createFromTempScop(*tempScop, LI, SE, SD, ctx);
+  scop = Scop::createFromTempScop(*tempScop, LI, SE, SD, AA, ctx);
 
   DEBUG(scop->print(dbgs()));
 
-  if (!PollyUseRuntimeAliasChecks) {
-    // Statistics.
-    ++ScopFound;
-    if (scop->getMaxLoopDepth() > 0)
-      ++RichScopFound;
+  if (!scop->hasFeasibleRuntimeContext()) {
+    delete scop;
+    scop = nullptr;
     return false;
   }
 
-  // If a problem occurs while building the alias groups we need to delete
-  // this SCoP and pretend it wasn't valid in the first place.
-  if (scop->buildAliasGroups(AA)) {
-    // Statistics.
-    ++ScopFound;
-    if (scop->getMaxLoopDepth() > 0)
-      ++RichScopFound;
-    return false;
-  }
-
-  DEBUG(dbgs()
-        << "\n\nNOTE: Run time checks for " << scop->getNameStr()
-        << " could not be created as the number of parameters involved is too "
-           "high. The SCoP will be "
-           "dismissed.\nUse:\n\t--polly-rtc-max-parameters=X\nto adjust the "
-           "maximal number of parameters but be advised that the compile time "
-           "might increase exponentially.\n\n");
-
-  delete scop;
-  scop = nullptr;
+  // Statistics.
+  ++ScopFound;
+  if (scop->getMaxLoopDepth() > 0)
+    ++RichScopFound;
   return false;
 }
 
@@ -2006,7 +2118,7 @@ INITIALIZE_PASS_BEGIN(ScopInfo, "polly-scops",
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis);
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
-INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
+INITIALIZE_PASS_DEPENDENCY(ScalarEvolutionWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(ScopDetection);
 INITIALIZE_PASS_DEPENDENCY(TempScopInfo);
 INITIALIZE_PASS_END(ScopInfo, "polly-scops",
