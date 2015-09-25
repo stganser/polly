@@ -26,7 +26,6 @@
 #include "polly/Support/GICHelper.h"
 #include "polly/Support/SCEVValidator.h"
 #include "polly/Support/ScopHelper.h"
-#include "polly/TempScopInfo.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -125,6 +124,33 @@ static bool checkIslAstExprInt(__isl_take isl_ast_expr *Expr,
 
 int IslNodeBuilder::getNumberOfIterations(__isl_keep isl_ast_node *For) {
   assert(isl_ast_node_get_type(For) == isl_ast_node_for);
+  auto Body = isl_ast_node_for_get_body(For);
+
+  // First, check if we can actually handle this code
+  switch (isl_ast_node_get_type(Body)) {
+  case isl_ast_node_user:
+    break;
+  case isl_ast_node_block: {
+    isl_ast_node_list *List = isl_ast_node_block_get_children(Body);
+    for (int i = 0; i < isl_ast_node_list_n_ast_node(List); ++i) {
+      isl_ast_node *Node = isl_ast_node_list_get_ast_node(List, i);
+      int Type = isl_ast_node_get_type(Node);
+      isl_ast_node_free(Node);
+      if (Type != isl_ast_node_user) {
+        isl_ast_node_list_free(List);
+        isl_ast_node_free(Body);
+        return -1;
+      }
+    }
+    isl_ast_node_list_free(List);
+    break;
+  }
+  default:
+    isl_ast_node_free(Body);
+    return -1;
+  }
+  isl_ast_node_free(Body);
+
   auto Init = isl_ast_node_for_get_init(For);
   if (!checkIslAstExprInt(Init, isl_val_is_zero))
     return -1;
@@ -149,59 +175,110 @@ int IslNodeBuilder::getNumberOfIterations(__isl_keep isl_ast_node *For) {
     return NumberIterations + 1;
 }
 
-struct FindValuesUser {
+struct SubtreeReferences {
   LoopInfo &LI;
   ScalarEvolution &SE;
   Region &R;
   SetVector<Value *> &Values;
   SetVector<const SCEV *> &SCEVs;
+  BlockGenerator &BlockGen;
 };
 
 /// @brief Extract the values and SCEVs needed to generate code for a block.
-static int findValuesInBlock(struct FindValuesUser &User, const ScopStmt *Stmt,
-                             const BasicBlock *BB) {
-  // Check all the operands of instructions in the basic block.
-  for (const Instruction &Inst : *BB) {
-    for (Value *SrcVal : Inst.operands()) {
-      if (Instruction *OpInst = dyn_cast<Instruction>(SrcVal))
-        if (canSynthesize(OpInst, &User.LI, &User.SE, &User.R)) {
-          User.SCEVs.insert(
-              User.SE.getSCEVAtScope(OpInst, User.LI.getLoopFor(BB)));
-          continue;
-        }
-      if (Instruction *OpInst = dyn_cast<Instruction>(SrcVal))
-        if (Stmt->getParent()->getRegion().contains(OpInst))
-          continue;
-
-      if (isa<Instruction>(SrcVal) || isa<Argument>(SrcVal))
-        User.Values.insert(SrcVal);
-    }
-  }
+static int findReferencesInBlock(struct SubtreeReferences &References,
+                                 const ScopStmt *Stmt, const BasicBlock *BB) {
+  for (const Instruction &Inst : *BB)
+    for (Value *SrcVal : Inst.operands())
+      if (canSynthesize(SrcVal, &References.LI, &References.SE,
+                        &References.R)) {
+        References.SCEVs.insert(
+            References.SE.getSCEVAtScope(SrcVal, References.LI.getLoopFor(BB)));
+        continue;
+      }
   return 0;
 }
 
-/// Extract the values and SCEVs needed to generate code for a ScopStmt.
+/// Extract the out-of-scop values and SCEVs referenced from a ScopStmt.
 ///
-/// This function extracts a ScopStmt from a given isl_set and computes the
-/// Values this statement depends on as well as a set of SCEV expressions that
-/// need to be synthesized when generating code for this statment.
-static isl_stat findValuesInStmt(isl_set *Set, void *UserPtr) {
-  isl_id *Id = isl_set_get_tuple_id(Set);
-  struct FindValuesUser &User = *static_cast<struct FindValuesUser *>(UserPtr);
-  const ScopStmt *Stmt = static_cast<const ScopStmt *>(isl_id_get_user(Id));
+/// This includes the SCEVUnknowns referenced by the SCEVs used in the
+/// statement and the base pointers of the memory accesses. For scalar
+/// statements we force the generation of alloca memory locations and list
+/// these locations in the set of out-of-scop values as well.
+///
+/// @param Stmt    The statement for which to extract the information.
+/// @param UserPtr A void pointer that can be casted to a SubtreeReferences
+///                structure.
+static isl_stat addReferencesFromStmt(const ScopStmt *Stmt, void *UserPtr) {
+  auto &References = *static_cast<struct SubtreeReferences *>(UserPtr);
 
   if (Stmt->isBlockStmt())
-    findValuesInBlock(User, Stmt, Stmt->getBasicBlock());
+    findReferencesInBlock(References, Stmt, Stmt->getBasicBlock());
   else {
     assert(Stmt->isRegionStmt() &&
            "Stmt was neither block nor region statement");
     for (const BasicBlock *BB : Stmt->getRegion()->blocks())
-      findValuesInBlock(User, Stmt, BB);
+      findReferencesInBlock(References, Stmt, BB);
   }
 
+  for (auto &Access : *Stmt) {
+    if (!Access->isScalar()) {
+      auto *BasePtr = Access->getScopArrayInfo()->getBasePtr();
+      if (Instruction *OpInst = dyn_cast<Instruction>(BasePtr))
+        if (Stmt->getParent()->getRegion().contains(OpInst))
+          continue;
+
+      References.Values.insert(BasePtr);
+      continue;
+    }
+
+    References.Values.insert(References.BlockGen.getOrCreateAlloca(*Access));
+  }
+
+  return isl_stat_ok;
+}
+
+/// Extract the out-of-scop values and SCEVs referenced from a set describing
+/// a ScopStmt.
+///
+/// This includes the SCEVUnknowns referenced by the SCEVs used in the
+/// statement and the base pointers of the memory accesses. For scalar
+/// statements we force the generation of alloca memory locations and list
+/// these locations in the set of out-of-scop values as well.
+///
+/// @param Set     A set which references the ScopStmt we are interested in.
+/// @param UserPtr A void pointer that can be casted to a SubtreeReferences
+///                structure.
+static isl_stat addReferencesFromStmtSet(isl_set *Set, void *UserPtr) {
+  isl_id *Id = isl_set_get_tuple_id(Set);
+  auto *Stmt = static_cast<const ScopStmt *>(isl_id_get_user(Id));
   isl_id_free(Id);
   isl_set_free(Set);
-  return isl_stat_ok;
+  return addReferencesFromStmt(Stmt, UserPtr);
+}
+
+/// Extract the out-of-scop values and SCEVs referenced from a union set
+/// referencing multiple ScopStmts.
+///
+/// This includes the SCEVUnknowns referenced by the SCEVs used in the
+/// statement and the base pointers of the memory accesses. For scalar
+/// statements we force the generation of alloca memory locations and list
+/// these locations in the set of out-of-scop values as well.
+///
+/// @param USet       A union set referencing the ScopStmts we are interested
+///                   in.
+/// @param References The SubtreeReferences data structure through which
+///                   results are returned and further information is
+///                   provided.
+static void
+addReferencesFromStmtUnionSet(isl_union_set *USet,
+                              struct SubtreeReferences &References) {
+  isl_union_set_foreach_set(USet, addReferencesFromStmtSet, &References);
+  isl_union_set_free(USet);
+}
+
+__isl_give isl_union_map *
+IslNodeBuilder::getScheduleForAstNode(__isl_keep isl_ast_node *For) {
+  return IslAstInfo::getSchedule(For);
 }
 
 void IslNodeBuilder::getReferencesInSubtree(__isl_keep isl_ast_node *For,
@@ -209,7 +286,8 @@ void IslNodeBuilder::getReferencesInSubtree(__isl_keep isl_ast_node *For,
                                             SetVector<const Loop *> &Loops) {
 
   SetVector<const SCEV *> SCEVs;
-  struct FindValuesUser FindValues = {LI, SE, S.getRegion(), Values, SCEVs};
+  struct SubtreeReferences References = {LI,     SE,    S.getRegion(),
+                                         Values, SCEVs, getBlockGenerator()};
 
   for (const auto &I : IDToValue)
     Values.insert(I.second);
@@ -217,10 +295,8 @@ void IslNodeBuilder::getReferencesInSubtree(__isl_keep isl_ast_node *For,
   for (const auto &I : OutsideLoopIterations)
     Values.insert(cast<SCEVUnknown>(I.second)->getValue());
 
-  isl_union_set *Schedule = isl_union_map_domain(IslAstInfo::getSchedule(For));
-
-  isl_union_set_foreach_set(Schedule, findValuesInStmt, &FindValues);
-  isl_union_set_free(Schedule);
+  isl_union_set *Schedule = isl_union_map_domain(getScheduleForAstNode(For));
+  addReferencesFromStmtUnionSet(Schedule, References);
 
   for (const SCEV *Expr : SCEVs) {
     findValues(Expr, Values);
@@ -263,17 +339,16 @@ void IslNodeBuilder::createUserVector(__isl_take isl_ast_node *User,
   isl_id *Id = isl_ast_expr_get_id(StmtExpr);
   isl_ast_expr_free(StmtExpr);
   ScopStmt *Stmt = (ScopStmt *)isl_id_get_user(Id);
-  Stmt->setAstBuild(IslAstInfo::getBuild(User));
-  VectorValueMapT VectorMap(IVS.size());
   std::vector<LoopToScevMapT> VLTS(IVS.size());
 
   isl_union_set *Domain = isl_union_set_from_set(Stmt->getDomain());
   Schedule = isl_union_map_intersect_domain(Schedule, Domain);
   isl_map *S = isl_map_from_union_map(Schedule);
 
-  createSubstitutionsVector(Expr, Stmt, VectorMap, VLTS, IVS, IteratorID);
-  VectorBlockGenerator::generate(BlockGen, *Stmt, VectorMap, VLTS, S);
-
+  auto *NewAccesses = createNewAccesses(Stmt, User);
+  createSubstitutionsVector(Expr, Stmt, VLTS, IVS, IteratorID);
+  VectorBlockGenerator::generate(BlockGen, *Stmt, VLTS, S, NewAccesses);
+  isl_id_to_ast_expr_free(NewAccesses);
   isl_map_free(S);
   isl_id_free(Id);
   isl_ast_node_free(User);
@@ -311,7 +386,7 @@ void IslNodeBuilder::createForVector(__isl_take isl_ast_node *For,
   for (int i = 1; i < VectorWidth; i++)
     IVS[i] = Builder.CreateAdd(IVS[i - 1], ValueInc, "p_vector_iv");
 
-  isl_union_map *Schedule = IslAstInfo::getSchedule(For);
+  isl_union_map *Schedule = getScheduleForAstNode(For);
   assert(Schedule && "For statement annotation does not contain its schedule");
 
   IDToValue[IteratorID] = ValueLB;
@@ -617,8 +692,29 @@ void IslNodeBuilder::createIf(__isl_take isl_ast_node *If) {
   isl_ast_node_free(If);
 }
 
+__isl_give isl_id_to_ast_expr *
+IslNodeBuilder::createNewAccesses(ScopStmt *Stmt,
+                                  __isl_keep isl_ast_node *Node) {
+  isl_id_to_ast_expr *NewAccesses =
+      isl_id_to_ast_expr_alloc(Stmt->getParent()->getIslCtx(), 0);
+  for (auto *MA : *Stmt) {
+    if (!MA->hasNewAccessRelation())
+      continue;
+
+    auto Build = IslAstInfo::getBuild(Node);
+    assert(Build && "Could not obtain isl_ast_build from user node");
+    auto Schedule = isl_ast_build_get_schedule(Build);
+    auto PWAccRel = MA->applyScheduleToAccessRelation(Schedule);
+
+    auto AccessExpr = isl_ast_build_access_from_pw_multi_aff(Build, PWAccRel);
+    NewAccesses = isl_id_to_ast_expr_set(NewAccesses, MA->getId(), AccessExpr);
+  }
+
+  return NewAccesses;
+}
+
 void IslNodeBuilder::createSubstitutions(isl_ast_expr *Expr, ScopStmt *Stmt,
-                                         ValueMapT &VMap, LoopToScevMapT &LTS) {
+                                         LoopToScevMapT &LTS) {
   assert(isl_ast_expr_get_type(Expr) == isl_ast_expr_op &&
          "Expression of type 'op' expected");
   assert(isl_ast_expr_get_op_type(Expr) == isl_ast_op_call &&
@@ -633,17 +729,11 @@ void IslNodeBuilder::createSubstitutions(isl_ast_expr *Expr, ScopStmt *Stmt,
     LTS[Stmt->getLoopForDimension(i)] = SE->getUnknown(V);
   }
 
-  // Add the current ValueMap to our per-statement value map.
-  //
-  // This is needed e.g. to rewrite array base addresses when moving code
-  // into a parallely executed subfunction.
-  VMap.insert(ValueMap.begin(), ValueMap.end());
-
   isl_ast_expr_free(Expr);
 }
 
 void IslNodeBuilder::createSubstitutionsVector(
-    __isl_take isl_ast_expr *Expr, ScopStmt *Stmt, VectorValueMapT &VMap,
+    __isl_take isl_ast_expr *Expr, ScopStmt *Stmt,
     std::vector<LoopToScevMapT> &VLTS, std::vector<Value *> &IVS,
     __isl_take isl_id *IteratorID) {
   int i = 0;
@@ -651,7 +741,7 @@ void IslNodeBuilder::createSubstitutionsVector(
   Value *OldValue = IDToValue[IteratorID];
   for (Value *IV : IVS) {
     IDToValue[IteratorID] = IV;
-    createSubstitutions(isl_ast_expr_copy(Expr), Stmt, VMap[i], VLTS[i]);
+    createSubstitutions(isl_ast_expr_copy(Expr), Stmt, VLTS[i]);
     i++;
   }
 
@@ -661,7 +751,6 @@ void IslNodeBuilder::createSubstitutionsVector(
 }
 
 void IslNodeBuilder::createUser(__isl_take isl_ast_node *User) {
-  ValueMapT VMap;
   LoopToScevMapT LTS;
   isl_id *Id;
   ScopStmt *Stmt;
@@ -674,14 +763,15 @@ void IslNodeBuilder::createUser(__isl_take isl_ast_node *User) {
   LTS.insert(OutsideLoopIterations.begin(), OutsideLoopIterations.end());
 
   Stmt = (ScopStmt *)isl_id_get_user(Id);
-  Stmt->setAstBuild(IslAstInfo::getBuild(User));
+  auto *NewAccesses = createNewAccesses(Stmt, User);
+  createSubstitutions(Expr, Stmt, LTS);
 
-  createSubstitutions(Expr, Stmt, VMap, LTS);
   if (Stmt->isBlockStmt())
-    BlockGen.copyStmt(*Stmt, VMap, LTS);
+    BlockGen.copyStmt(*Stmt, LTS, NewAccesses);
   else
-    RegionGen.copyStmt(*Stmt, VMap, LTS);
+    RegionGen.copyStmt(*Stmt, LTS, NewAccesses);
 
+  isl_id_to_ast_expr_free(NewAccesses);
   isl_ast_node_free(User);
   isl_id_free(Id);
 }

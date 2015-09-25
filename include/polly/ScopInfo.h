@@ -59,13 +59,42 @@ struct isl_schedule;
 
 namespace polly {
 
-class IRAccess;
+class MemoryAccess;
 class Scop;
 class ScopStmt;
 class ScopInfo;
-class TempScop;
 class Comparison;
 class SCEVAffFunc;
+
+class Comparison {
+  const SCEV *LHS;
+  const SCEV *RHS;
+
+  ICmpInst::Predicate Pred;
+
+public:
+  Comparison(const SCEV *LHS, const SCEV *RHS, ICmpInst::Predicate Pred)
+      : LHS(LHS), RHS(RHS), Pred(Pred) {}
+
+  const SCEV *getLHS() const { return LHS; }
+  const SCEV *getRHS() const { return RHS; }
+
+  ICmpInst::Predicate getPred() const { return Pred; }
+  void print(raw_ostream &OS) const;
+};
+
+//===---------------------------------------------------------------------===//
+
+/// Maps from a loop to the affine function expressing its backedge taken count.
+/// The backedge taken count already enough to express iteration domain as we
+/// only allow loops with canonical induction variable.
+/// A canonical induction variable is:
+/// an integer recurrence that starts at 0 and increments by one each time
+/// through the loop.
+typedef std::map<const Loop *, const SCEV *> LoopBoundMapType;
+
+typedef std::deque<MemoryAccess> AccFuncSetType;
+typedef std::map<const BasicBlock *, AccFuncSetType> AccFuncMapType;
 
 /// @brief A class to store information about arrays in the SCoP.
 ///
@@ -83,8 +112,7 @@ public:
   /// @param IsPHI          Is this a PHI node specific array info object.
   /// @param S              The scop this array object belongs to.
   ScopArrayInfo(Value *BasePtr, Type *ElementType, isl_ctx *IslCtx,
-                const SmallVector<const SCEV *, 4> &DimensionSizes, bool IsPHI,
-                Scop *S);
+                ArrayRef<const SCEV *> DimensionSizes, bool IsPHI, Scop *S);
 
   /// @brief Destructor to free the isl id of the base pointer.
   ~ScopArrayInfo();
@@ -186,6 +214,9 @@ private:
 
 /// @brief Represent memory accesses in statements.
 class MemoryAccess {
+  friend class Scop;
+  friend class ScopStmt;
+
 public:
   /// @brief The access type of a memory access
   ///
@@ -207,7 +238,11 @@ public:
   /// A certain set of memory locations may be written. The memory location may
   /// contain a new value if there is actually a write or the old value may
   /// remain, if no write happens.
-  enum AccessType { READ, MUST_WRITE, MAY_WRITE };
+  enum AccessType {
+    READ = 0x1,
+    MUST_WRITE = 0x2,
+    MAY_WRITE = 0x3,
+  };
 
   /// @brief Reduction access type
   ///
@@ -225,15 +260,18 @@ private:
   MemoryAccess(const MemoryAccess &) = delete;
   const MemoryAccess &operator=(const MemoryAccess &) = delete;
 
-  isl_map *AccessRelation;
+  /// @brief A unique identifier for this memory access.
+  ///
+  /// The identifier is unique between all memory accesses belonging to the same
+  /// scop statement.
+  isl_id *Id;
+
+  /// @brief Is this MemoryAccess modeling special PHI node accesses?
+  bool IsPHI;
+
+  /// @brief Whether it a reading or writing access, and if writing, whether it
+  /// is conditional (MAY_WRITE).
   enum AccessType AccType;
-
-  /// @brief The base address (e.g., A for A[i+j]).
-  Value *BaseAddr;
-
-  std::string BaseName;
-  __isl_give isl_basic_map *createBasicAccessMap(ScopStmt *Statement);
-  ScopStmt *Statement;
 
   /// @brief Reduction type for reduction like accesses, RT_NONE otherwise
   ///
@@ -253,7 +291,7 @@ private:
   ///        sum[i+j] = sum[i] + 3;
   ///
   /// Here not all iterations access the same memory location, but iterations
-  /// for which j = 0 holds do. After lifing the equality check in ScopInfo,
+  /// for which j = 0 holds do. After lifting the equality check in ScopInfo,
   /// subsequent transformations do not only need check if a statement is
   /// reduction like, but they also need to verify that that the reduction
   /// property is only exploited for statement instances that load from and
@@ -261,27 +299,65 @@ private:
   /// could allow us to handle the above example.
   ReductionType RedType = RT_NONE;
 
+  /// @brief Parent ScopStmt of this access.
+  ScopStmt *Statement;
+
+  // Properties describing the accessed array.
+  // TODO: It might be possible to move them to ScopArrayInfo.
+  // @{
+
+  /// @brief The base address (e.g., A for A[i+j]).
+  Value *BaseAddr;
+
+  /// @brief An unique name of the accessed array.
+  std::string BaseName;
+
+  /// @brief Size in bytes of a single array element.
+  unsigned ElemBytes;
+
+  /// @brief Size of each dimension of the accessed array.
+  SmallVector<const SCEV *, 4> Sizes;
+  // @}
+
+  // Properties describing the accessed element.
+  // @{
+
   /// @brief The access instruction of this memory access.
   Instruction *AccessInstruction;
 
   /// @brief The value associated with this memory access.
   ///
   ///  - For real memory accesses it is the loaded result or the stored value.
-  ///  - For straigt line scalar accesses it is the access instruction itself.
+  ///  - For straight line scalar accesses it is the access instruction itself.
   ///  - For PHI operand accesses it is the operand value.
   ///
   Value *AccessValue;
 
-  /// Updated access relation read from JSCOP file.
-  isl_map *newAccessRelation;
+  /// @brief Are all the subscripts affine expression?
+  bool IsAffine;
 
-  /// @brief A unique identifier for this memory access.
-  ///
-  /// The identifier is unique between all memory accesses belonging to the same
-  /// scop statement.
-  isl_id *Id;
+  /// @brief Subscript expression for each dimension.
+  SmallVector<const SCEV *, 4> Subscripts;
 
-  void assumeNoOutOfBound(const IRAccess &Access);
+  /// @brief Relation from statment instances to the accessed array elements.
+  isl_map *AccessRelation;
+
+  /// @brief Updated access relation read from JSCOP file.
+  isl_map *NewAccessRelation;
+  // @}
+
+  unsigned getElemSizeInBytes() const { return ElemBytes; }
+
+  bool isAffine() const { return IsAffine; }
+
+  /// @brief Is this MemoryAccess modeling special PHI node accesses?
+  bool isPHI() const { return IsPHI; }
+
+  void setStatement(ScopStmt *Stmt) { this->Statement = Stmt; }
+
+  __isl_give isl_basic_map *createBasicAccessMap(ScopStmt *Statement);
+
+  void assumeNoOutOfBound();
 
   /// @brief Compute bounds on an over approximated  access relation.
   ///
@@ -325,22 +401,35 @@ private:
   /// The introduction of different cases necessarily complicates the memory
   /// access function, but cases that can be statically proven to not happen
   /// will be eliminated later on.
-  __isl_give isl_map *foldAccess(const IRAccess &Access,
-                                 __isl_take isl_map *AccessRelation,
+  __isl_give isl_map *foldAccess(__isl_take isl_map *AccessRelation,
                                  ScopStmt *Statement);
 
-public:
-  /// @brief Create a memory access from an access in LLVM-IR.
+  /// @brief Assemble the access relation from all availbale information.
   ///
-  /// @param Access     The memory access.
-  /// @param AccInst    The access instruction.
-  /// @param Statement  The statement that contains the access.
-  /// @param SAI        The ScopArrayInfo object for this base pointer.
-  /// @param Identifier An identifier that is unique for all memory accesses
-  ///                   belonging to the same scop statement.
-  MemoryAccess(const IRAccess &Access, Instruction *AccInst,
-               ScopStmt *Statement, const ScopArrayInfo *SAI, int Identifier);
+  /// In particular, used the information passes in the constructor and the
+  /// parent ScopStmt set by setStatment().
+  ///
+  /// @param SAI Info object for the accessed array.
+  void buildAccessRelation(const ScopArrayInfo *SAI);
 
+public:
+  /// @brief Create a new MemoryAccess.
+  ///
+  /// @param AccessInst The instruction doing the access.
+  /// @param Id         Identifier that is guranteed to be unique within the
+  ///                   same ScopStmt.
+  /// @param BaseAddr   The accessed array's address.
+  /// @param ElemBytes  Number of accessed bytes.
+  /// @param AccType    Whether read or write access.
+  /// @param IsAffine   Whether the subscripts are affine expressions.
+  /// @param IsPHI      Are we modeling special PHI node accesses?
+  /// @param Subscripts Subscipt expressions
+  /// @param Sizes      Dimension lengths of the accessed array.
+  /// @param BaseName   Name of the acessed array.
+  MemoryAccess(Instruction *AccessInst, __isl_take isl_id *Id, AccessType Type,
+               Value *BaseAddress, unsigned ElemBytes, bool Affine,
+               ArrayRef<const SCEV *> Subscripts, ArrayRef<const SCEV *> Sizes,
+               Value *AccessValue, bool IsPHI, StringRef BaseName);
   ~MemoryAccess();
 
   /// @brief Get the type of a memory access.
@@ -362,7 +451,7 @@ public:
   bool isWrite() const { return isMustWrite() || isMayWrite(); }
 
   /// @brief Check if a new access relation was imported or set by a pass.
-  bool hasNewAccessRelation() const { return newAccessRelation; }
+  bool hasNewAccessRelation() const { return NewAccessRelation; }
 
   /// @brief Return the newest access relation of this access.
   ///
@@ -385,6 +474,9 @@ public:
 
   /// @brief Get an isl string representing the access function read from IR.
   std::string getOriginalAccessRelationStr() const;
+
+  /// @brief Get an isl string representing a new access function, if available.
+  std::string getNewAccessRelationStr() const;
 
   /// @brief Get the base address of this access (e.g. A for A[i+j]).
   Value *getBaseAddr() const { return BaseAddr; }
@@ -441,7 +533,7 @@ public:
   ReductionType getReductionType() const { return RedType; }
 
   /// @brief Set the updated access relation read from JSCOP file.
-  void setNewAccessRelation(__isl_take isl_map *newAccessRelation);
+  void setNewAccessRelation(__isl_take isl_map *NewAccessRelation);
 
   /// @brief Mark this a reduction like access
   void markAsReductionLike(ReductionType RT) { RedType = RT; }
@@ -478,18 +570,16 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
 class ScopStmt {
 public:
   /// @brief List to hold all (scalar) memory accesses mapped to an instruction.
-  using MemoryAccessList = std::forward_list<MemoryAccess>;
+  using MemoryAccessList = std::forward_list<MemoryAccess *>;
 
   ScopStmt(const ScopStmt &) = delete;
   const ScopStmt &operator=(const ScopStmt &) = delete;
 
   /// Create the ScopStmt from a BasicBlock.
-  ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion,
-           BasicBlock &bb, SmallVectorImpl<Loop *> &NestLoops);
+  ScopStmt(Scop &parent, BasicBlock &bb);
 
   /// Create an overapproximating ScopStmt for the region @p R.
-  ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion, Region &R,
-           SmallVectorImpl<Loop *> &NestLoops);
+  ScopStmt(Scop &parent, Region &R);
 
 private:
   /// Polyhedral description
@@ -548,27 +638,25 @@ private:
   /// @brief The isl AST build for the new generated AST.
   isl_ast_build *Build;
 
-  std::vector<Loop *> NestLoops;
+  SmallVector<Loop *, 4> NestLoops;
 
   std::string BaseName;
 
   /// Build the statement.
   //@{
-  __isl_give isl_set *buildConditionSet(const Comparison &Cmp);
-  void addConditionsToDomain(TempScop &tempScop, const Region &CurRegion);
-  void addLoopBoundsToDomain(TempScop &tempScop);
-  void buildDomain(TempScop &tempScop, const Region &CurRegion);
+  void buildDomain();
+
+  /// @brief Fill NestLoops with loops surrounding this statement.
+  void collectSurroundingLoops();
 
   /// @brief Create the accesses for instructions in @p Block.
   ///
-  /// @param tempScop       The template SCoP.
   /// @param Block          The basic block for which accesses should be
   ///                       created.
   /// @param isApproximated Flag to indicate blocks that might not be executed,
   ///                       hence for which write accesses need to be modeled as
   ///                       may-write accesses.
-  void buildAccesses(TempScop &tempScop, BasicBlock *Block,
-                     bool isApproximated = false);
+  void buildAccesses(BasicBlock *Block, bool isApproximated = false);
 
   /// @brief Detect and mark reductions in the ScopStmt
   void checkForReductions();
@@ -684,8 +772,7 @@ public:
   /// @brief Return the __first__ (scalar) memory access for @p Inst if any.
   MemoryAccess *lookupAccessFor(const Instruction *Inst) const {
     auto It = InstructionToAccess.find(Inst);
-    return It == InstructionToAccess.end() ? nullptr
-                                           : &It->getSecond()->front();
+    return It == InstructionToAccess.end() ? nullptr : It->getSecond()->front();
   }
 
   void setBasicBlock(BasicBlock *Block) {
@@ -787,13 +874,20 @@ private:
   Scop(const Scop &) = delete;
   const Scop &operator=(const Scop &) = delete;
 
+  DominatorTree &DT;
   ScalarEvolution *SE;
 
   /// The underlying Region.
   Region &R;
 
+  // Access function of bbs.
+  AccFuncMapType &AccFuncMap;
+
   /// Flag to indicate that the scheduler actually optimized the SCoP.
   bool IsOptimized;
+
+  /// @brief True if the underlying region has a single exiting block.
+  bool HasSingleExitEdge;
 
   /// Max loop depth.
   unsigned MaxLoopDepth;
@@ -815,6 +909,9 @@ private:
 
   /// @brief A map from basic blocks to SCoP statements.
   DenseMap<BasicBlock *, ScopStmt *> StmtMap;
+
+  /// @brief A map from basic blocks to their domains.
+  DenseMap<BasicBlock *, isl_set *> DomainMap;
 
   /// Constraints on parameters.
   isl_set *Context;
@@ -839,6 +936,17 @@ private:
   /// assumed context records the assumptions taken during the construction of
   /// this scop and that need to be code generated as a run-time test.
   isl_set *AssumedContext;
+
+  /// @brief The boundary assumptions under which this scop was built.
+  ///
+  /// The boundary context is similar to the assumed context as it contains
+  /// constraints over the parameters we assume to be true. However, the
+  /// boundary context is less useful for dependence analysis and
+  /// simplification purposes as it contains only constraints that affect the
+  /// boundaries of the parameter ranges. As these constraints can become quite
+  /// complex, the boundary context and the assumed context are separated as a
+  /// meassure to save compile time.
+  isl_set *BoundaryContext;
 
   /// @brief The schedule of the SCoP
   ///
@@ -891,18 +999,45 @@ private:
   /// group to ensure the SCoP is executed in an alias free environment.
   MinMaxVectorPairVectorTy MinMaxAliasGroups;
 
-  /// @brief Scop constructor; used by static createFromTempScop
-  Scop(Region &R, ScalarEvolution &SE, isl_ctx *ctx, unsigned MaxLoopDepth);
+  /// @brief Scop constructor; invoked from ScopInfo::buildScop.
+  Scop(Region &R, AccFuncMapType &AccFuncMap, ScalarEvolution &SE,
+       DominatorTree &DT, isl_ctx *ctx, unsigned MaxLoopDepth);
 
-  /// @brief Initialize this ScopInfo using a TempScop object.
-  void initFromTempScop(TempScop &TempScop, LoopInfo &LI, ScopDetection &SD,
-                        AliasAnalysis &AA);
+  /// @brief Initialize this ScopInfo .
+  void init(LoopInfo &LI, ScopDetection &SD, AliasAnalysis &AA);
 
-  /// Create the static control part with a region, max loop depth of this
-  /// region and parameters used in this region.
-  static Scop *createFromTempScop(TempScop &TempScop, LoopInfo &LI,
-                                  ScalarEvolution &SE, ScopDetection &SD,
-                                  AliasAnalysis &AA, isl_ctx *ctx);
+  /// @brief Add loop carried constraints to the header block of the loop @p L.
+  ///
+  /// @param L  The loop to process.
+  /// @param LI The LoopInfo analysis.
+  void addLoopBoundsToHeaderDomain(Loop *L, LoopInfo &LI);
+
+  /// @brief Compute the branching constraints for each basic block in @p R.
+  ///
+  /// @param R  The region we currently build branching conditions for.
+  /// @param LI The LoopInfo analysis to obtain the number of iterators.
+  /// @param SD The ScopDetection analysis to identify non-affine sub-regions.
+  /// @param DT The dominator tree of the current function.
+  void buildDomainsWithBranchConstraints(Region *R, LoopInfo &LI,
+                                         ScopDetection &SD, DominatorTree &DT);
+
+  /// @brief Propagate the domain constraints through the region @p R.
+  ///
+  /// @param R  The region we currently build branching conditions for.
+  /// @param LI The LoopInfo analysis to obtain the number of iterators.
+  /// @param SD The ScopDetection analysis to identify non-affine sub-regions.
+  /// @param DT The dominator tree of the current function.
+  void propagateDomainConstraints(Region *R, LoopInfo &LI, ScopDetection &SD,
+                                  DominatorTree &DT);
+
+  /// @brief Compute the domain for each basic block in @p R.
+  ///
+  /// @param R  The region we currently traverse.
+  /// @param LI The LoopInfo analysis to argue about the number of iterators.
+  /// @param SD The ScopDetection analysis to identify non-affine sub-regions.
+  /// @param DT The dominator tree of the current function.
+  void buildDomains(Region *R, LoopInfo &LI, ScopDetection &SD,
+                    DominatorTree &DT);
 
   /// @brief Check if a basic block is trivial.
   ///
@@ -910,10 +1045,9 @@ private:
   /// it does not need to be represented as a polyhedral statement.
   ///
   /// @param BB The basic block to check
-  /// @param tempScop TempScop returning further information regarding the Scop.
   ///
   /// @return True if the basic block is trivial, otherwise false.
-  static bool isTrivialBB(BasicBlock *BB, TempScop &tempScop);
+  bool isTrivialBB(BasicBlock *BB);
 
   /// @brief Add parameter constraints to @p C that imply a non-empty domain.
   __isl_give isl_set *addNonEmptyDomainConstraints(__isl_take isl_set *C) const;
@@ -921,14 +1055,17 @@ private:
   /// @brief Build the Context of the Scop.
   void buildContext();
 
+  /// @brief Build the BoundaryContext based on the wrapping of expressions.
+  void buildBoundaryContext();
+
   /// @brief Add user provided parameter constraints to context.
   void addUserContext();
 
   /// @brief Add the bounds of the parameters to the context.
   void addParameterBounds();
 
-  /// @brief Simplify the assumed context.
-  void simplifyAssumedContext();
+  /// @brief Simplify the assumed and boundary context.
+  void simplifyContexts();
 
   /// @brief Create a new SCoP statement for either @p BB or @p R.
   ///
@@ -937,40 +1074,16 @@ private:
   ///
   /// @param BB         The basic block we build the statement for (or null)
   /// @param R          The region we build the statement for (or null).
-  /// @param tempScop   The temp SCoP we use as model.
-  /// @param CurRegion  The SCoP region.
-  /// @param NestLoops  A vector of all surrounding loops.
-  ScopStmt *addScopStmt(BasicBlock *BB, Region *R, TempScop &tempScop,
-                        const Region &CurRegion,
-                        SmallVectorImpl<Loop *> &NestLoops);
+  ScopStmt *addScopStmt(BasicBlock *BB, Region *R);
 
-  /// @brief Create the ScopStmt for a BasicBlock and return its schedule.
+  /// @brief Build Schedule and ScopStmts.
   ///
-  /// Returns null if the BB is trivial and no stmt has been created.
-  ///
-  /// @param BB         The basic block we build the statement for.
-  /// @param tempScop   The temp SCoP we use as model.
-  /// @param CurRegion  The SCoP region.
-  /// @param NestLoops  A vector of all surrounding loops.
-  ///
-  /// @return The ScopStmt's schedule.
-  __isl_give isl_schedule *buildBBScopStmt(BasicBlock *BB, TempScop &tempScop,
-                                           const Region &CurRegion,
-                                           SmallVectorImpl<Loop *> &NestLoops);
-
-  /// @brief Build Scop and ScopStmts from a given TempScop.
-  ///
-  /// @param TempScop  The temporary scop that is translated into an actual
-  ///                  scop.
-  /// @param CurRegion The subregion of the current scop that we are currently
-  ///                  translating.
-  /// @param NestLoop  The set of loops that surround the current subregion.
-  /// @param LI        The LoopInfo object.
-  /// @param SD        The ScopDetection object.
-  __isl_give isl_schedule *buildScop(TempScop &TempScop,
-                                     const Region &CurRegion,
-                                     SmallVectorImpl<Loop *> &NestLoops,
-                                     LoopInfo &LI, ScopDetection &SD);
+  /// @param R  The current region traversed.
+  /// @param LI The LoopInfo object.
+  /// @param SD The ScopDetection object.
+  void buildSchedule(
+      Region *R, LoopInfo &LI, ScopDetection &SD,
+      DenseMap<Loop *, std::pair<isl_schedule *, unsigned>> &LoopSchedules);
 
   /// @name Helper function for printing the Scop.
   ///
@@ -985,6 +1098,18 @@ private:
 
 public:
   ~Scop();
+
+  /// @brief Get all access functions in a BasicBlock
+  ///
+  /// @param  BB The BasicBlock that containing the access functions.
+  ///
+  /// @return All access functions in BB
+  ///
+  AccFuncSetType *getAccessFunctions(const BasicBlock *BB) {
+    AccFuncMapType::iterator at = AccFuncMap.find(BB);
+    return at != AccFuncMap.end() ? &(at->second) : 0;
+  }
+  //@}
 
   ScalarEvolution *getSE() const;
 
@@ -1098,6 +1223,11 @@ public:
   ///            to hold.
   void addAssumption(__isl_take isl_set *Set);
 
+  /// @brief Get the boundary context for this Scop.
+  ///
+  /// @return The boundary context of this Scop.
+  __isl_give isl_set *getBoundaryContext() const;
+
   /// @brief Build the alias checks for this SCoP.
   void buildAliasChecks(AliasAnalysis &AA);
 
@@ -1116,6 +1246,9 @@ public:
 
   /// @brief Get an isl string representing the assumed context.
   std::string getAssumedContextStr() const;
+
+  /// @brief Get an isl string representing the boundary context.
+  std::string getBoundaryContextStr() const;
 
   /// @brief Return the stmt for the given @p BB or nullptr if none.
   ScopStmt *getStmtForBasicBlock(BasicBlock *BB) const;
@@ -1149,10 +1282,10 @@ public:
   /// @param ElementType The type of the elements stored in this array.
   /// @param IsPHI       Is this ScopArrayInfo object modeling special
   ///                    PHI node storage.
-  const ScopArrayInfo *
-  getOrCreateScopArrayInfo(Value *BasePtr, Type *ElementType,
-                           const SmallVector<const SCEV *, 4> &Sizes,
-                           bool IsPHI = false);
+  const ScopArrayInfo *getOrCreateScopArrayInfo(Value *BasePtr,
+                                                Type *ElementType,
+                                                ArrayRef<const SCEV *> Sizes,
+                                                bool IsPHI = false);
 
   /// @brief Return the cached ScopArrayInfo object for @p BasePtr.
   ///
@@ -1164,6 +1297,9 @@ public:
 
   /// @brief Align the parameters in the statement to the scop context
   void realignParams();
+
+  /// @brief Return true if the underlying region has a single exiting block.
+  bool hasSingleExitEdge() const { return HasSingleExitEdge; }
 
   /// @brief Print the static control part.
   ///
@@ -1180,11 +1316,20 @@ public:
 
   /// @brief Compute the isl representation for the SCEV @p
   ///
+  /// @param BB An (optional) basic block in which the isl_pw_aff is computed.
+  ///           SCEVs known to not reference any loops in the SCoP can be
+  ///           passed without a @p BB.
+  __isl_give isl_pw_aff *getPwAff(const SCEV *E, BasicBlock *BB = nullptr);
+
+  /// @brief Return the non-loop carried conditions on the domain of @p Stmt.
   ///
-  /// @param Stmt An (optional) statement for which the isl_pw_aff is
-  ///             computed. SCEVs known to not reference any loops in the
-  ///             scop can be passed without a statement.
-  __isl_give isl_pw_aff *getPwAff(const SCEV *E, ScopStmt *Stmt = nullptr);
+  /// @param Stmt The statement for which the conditions should be returned.
+  __isl_give isl_set *getDomainConditions(ScopStmt *Stmt);
+
+  /// @brief Return the non-loop carried conditions on the domain of @p BB.
+  ///
+  /// @param BB The block for which the conditions should be returned.
+  __isl_give isl_set *getDomainConditions(BasicBlock *BB);
 
   /// @brief Get a union set containing the iteration domains of all statements.
   __isl_give isl_union_set *getDomains() const;
@@ -1221,6 +1366,14 @@ public:
   ///
   /// @return true if a change was made
   bool restrictDomains(__isl_take isl_union_set *Domain);
+
+  /// @brief Get the depth of a loop relative to the outermost loop in the Scop.
+  ///
+  /// This will return
+  ///    0 if @p L is an outermost loop in the SCoP
+  ///   >0 for other loops in the SCoP
+  ///   -1 if @p L is nullptr or there is no outermost loop in the SCoP
+  int getRelativeLoopDepth(const Loop *L) const;
 };
 
 /// @brief Print Scop scop to raw_ostream O.
@@ -1237,15 +1390,121 @@ class ScopInfo : public RegionPass {
   ScopInfo(const ScopInfo &) = delete;
   const ScopInfo &operator=(const ScopInfo &) = delete;
 
+  // The ScalarEvolution to help building Scop.
+  ScalarEvolution *SE;
+
+  // LoopInfo for information about loops
+  LoopInfo *LI;
+
+  // The AliasAnalysis to build AliasSetTracker.
+  AliasAnalysis *AA;
+
+  // Valid Regions for Scop
+  ScopDetection *SD;
+
+  // Target data for element size computing.
+  const DataLayout *TD;
+
+  // Access function of statements (currently BasicBlocks) .
+  //
+  // This owns all the MemoryAccess objects of the Scop created in this pass. It
+  // must live until #scop is deleted.
+  AccFuncMapType AccFuncMap;
+
+  // Pre-created zero for the scalar accesses, with it we do not need create a
+  // zero scev every time when we need it.
+  const SCEV *ZeroOffset;
+
   // The Scop
   Scop *scop;
   isl_ctx *ctx;
 
-  void clear() {
-    if (scop) {
-      delete scop;
-      scop = 0;
-    }
+  // Clear the context.
+  void clear();
+
+  // Build the SCoP for Region @p R.
+  Scop *buildScop(Region &R, DominatorTree &DT);
+
+  /// @brief Build an instance of MemoryAccess from the Load/Store instruction.
+  ///
+  /// @param Inst       The Load/Store instruction that access the memory
+  /// @param L          The parent loop of the instruction
+  /// @param R          The region on which to build the data access dictionary.
+  /// @param BoxedLoops The set of loops that are overapproximated in @p R.
+  void buildMemoryAccess(Instruction *Inst, Loop *L, Region *R,
+                         const ScopDetection::BoxedLoopsSetTy *BoxedLoops);
+
+  /// @brief Analyze and extract the cross-BB scalar dependences (or,
+  ///        dataflow dependencies) of an instruction.
+  ///
+  /// @param Inst               The instruction to be analyzed
+  /// @param R                  The SCoP region
+  /// @param NonAffineSubRegion The non affine sub-region @p Inst is in.
+  ///
+  /// @return     True if the Instruction is used in other BB and a scalar write
+  ///             Access is required.
+  bool buildScalarDependences(Instruction *Inst, Region *R,
+                              Region *NonAffineSubRegio);
+
+  /// @brief Create MemoryAccesses for the given PHI node in the given region.
+  ///
+  /// @param PHI                The PHI node to be handled
+  /// @param R                  The SCoP region
+  /// @param NonAffineSubRegion The non affine sub-region @p PHI is in.
+  /// @param IsExitBlock        Flag to indicate that @p PHI is in the exit BB.
+  void buildPHIAccesses(PHINode *PHI, Region &R, Region *NonAffineSubRegion,
+                        bool IsExitBlock = false);
+
+  /// @brief Build the access functions for the subregion @p SR.
+  ///
+  /// @param R  The SCoP region.
+  /// @param SR A subregion of @p R.
+  void buildAccessFunctions(Region &R, Region &SR);
+
+  /// @brief Build the access functions for the basic block @p BB
+  ///
+  /// @param R                  The SCoP region.
+  /// @param BB                 A basic block in @p R.
+  /// @param NonAffineSubRegion The non affine sub-region @p BB is in.
+  /// @param IsExitBlock        Flag to indicate that @p BB is in the exit BB.
+  void buildAccessFunctions(Region &R, BasicBlock &BB,
+                            Region *NonAffineSubRegion = nullptr,
+                            bool IsExitBlock = false);
+
+  /// @brief Create a new MemoryAccess object and add it to #AccFuncMap.
+  ///
+  /// @param BB          The block where the access takes place.
+  /// @param Inst        The instruction doing the access. It is not necessarily
+  ///                    inside @p BB.
+  /// @param Type        The kind of access.
+  /// @param BaseAddress The accessed array's base address.
+  /// @param ElemBytes   Size of accessed array element.
+  /// @param Affine      Whether all subscripts are affine expressions.
+  /// @param AccessValue Value read or written.
+  /// @param Subscripts  Access subscripts per dimension.
+  /// @param Sizes       The array diminsion's sizes.
+  /// @param IsPHI       Whether this is an emulated PHI node.
+  void addMemoryAccess(BasicBlock *BB, Instruction *Inst,
+                       MemoryAccess::AccessType Type, Value *BaseAddress,
+                       unsigned ElemBytes, bool Affine, Value *AccessValue,
+                       ArrayRef<const SCEV *> Subscripts,
+                       ArrayRef<const SCEV *> Sizes, bool IsPHI);
+
+  void addMemoryAccess(BasicBlock *BB, Instruction *Inst,
+                       MemoryAccess::AccessType Type, Value *BaseAddress,
+                       unsigned ElemBytes, bool Affine, Value *AccessValue,
+                       bool IsPHI = false) {
+    addMemoryAccess(BB, Inst, Type, BaseAddress, ElemBytes, Affine, AccessValue,
+                    ArrayRef<const SCEV *>(), ArrayRef<const SCEV *>(), IsPHI);
+  }
+
+  void addMemoryAccess(BasicBlock *BB, Instruction *Inst,
+                       MemoryAccess::AccessType Type, Value *BaseAddress,
+                       unsigned ElemBytes, bool Affine,
+                       ArrayRef<const SCEV *> Subscripts,
+                       ArrayRef<const SCEV *> Sizes, Value *AccessValue) {
+    addMemoryAccess(BB, Inst, Type, BaseAddress, ElemBytes, Affine, AccessValue,
+                    Subscripts, Sizes, false);
   }
 
 public:
@@ -1267,12 +1526,7 @@ public:
   virtual bool runOnRegion(Region *R, RGPassManager &RGM);
   virtual void getAnalysisUsage(AnalysisUsage &AU) const;
   virtual void releaseMemory() { clear(); }
-  virtual void print(raw_ostream &OS, const Module *) const {
-    if (scop)
-      scop->print(OS);
-    else
-      OS << "Invalid Scop!\n";
-  }
+  virtual void print(raw_ostream &OS, const Module *) const;
   //@}
 };
 

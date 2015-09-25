@@ -78,6 +78,17 @@ else (NOT DEFINED LLVM_MAIN_SRC_DIR)
 
   set_target_properties(check-polly PROPERTIES FOLDER "Polly")
 
+  # Run polly-check-format as part of polly-check only if we are compiling with
+  # clang, so clang-format is availbale.
+  # if (TARGET clang-format) would be preferable, but this target is only added
+  # after Polly, i.e. there is no such target yet at this point. The CMake cache
+  # entry LLVM_TOOL_CLANG_BUILD will only be defined after clang has been
+  # configured at least once, i.e. format will be checked only after a rerun of
+  # CMake's configure.
+  if (LLVM_TOOL_CLANG_BUILD)
+    add_dependencies(check-polly polly-check-format)
+  endif ()
+
 endif (NOT DEFINED LLVM_MAIN_SRC_DIR)
 
 configure_file(

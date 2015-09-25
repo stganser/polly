@@ -1,6 +1,6 @@
 ; RUN: opt %loadPolly -polly-detect-unprofitable -pass-remarks-missed="polly-detect" -polly-detect-track-failures -polly-allow-nonaffine-loops=false -polly-detect -analyze < %s 2>&1| FileCheck %s --check-prefix=REJECTNONAFFINELOOPS
 ; RUN: opt %loadPolly -polly-detect-unprofitable -pass-remarks-missed="polly-detect" -polly-detect-track-failures -polly-allow-nonaffine-loops=true -polly-detect -analyze < %s 2>&1| FileCheck %s --check-prefix=ALLOWNONAFFINELOOPS
-; RUN: opt %loadPolly -polly-detect-unprofitable -pass-remarks-missed="polly-detect" -polly-detect-track-failures -polly-allow-nonaffine-loops=true -polly-allow-nonaffine -polly-detect -analyze < %s 2>&1| FileCheck %s --check-prefix=ALLOWNONAFFINEALL
+; RUN: opt %loadPolly -pass-remarks-missed="polly-detect" -polly-detect-track-failures -polly-allow-nonaffine-loops=true -polly-allow-nonaffine -polly-detect -analyze < %s 2>&1| FileCheck %s --check-prefix=ALLOWNONAFFINEALL
 
 ; void f(int A[], int n) {
 ;   for (int i = 0; i < A[n]; i++)
@@ -79,7 +79,7 @@ attributes #1 = { nounwind readnone }
 !1 = !DIFile(filename: "ReportLoopBound-01.c", directory: "test/ScopDetectionDiagnostic/")
 !2 = !{}
 !3 = !{!4}
-!4 = !DISubprogram(name: "f", line: 1, isLocal: false, isDefinition: true, virtualIndex: 6, flags: DIFlagPrototyped, isOptimized: false, scopeLine: 1, file: !1, scope: !5, type: !6, function: void (i32*, i32)* @f, variables: !2)
+!4 = distinct !DISubprogram(name: "f", line: 1, isLocal: false, isDefinition: true, virtualIndex: 6, flags: DIFlagPrototyped, isOptimized: false, scopeLine: 1, file: !1, scope: !5, type: !6, function: void (i32*, i32)* @f, variables: !2)
 !5 = !DIFile(filename: "ReportLoopBound-01.c", directory: "test/ScopDetectionDiagnostic/")
 !6 = !DISubroutineType(types: !7)
 !7 = !{null, !8, !9}

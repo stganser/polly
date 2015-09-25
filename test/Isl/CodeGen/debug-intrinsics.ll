@@ -1,4 +1,11 @@
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-no-early-exit -polly-codegen -S < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-detect-unprofitable -polly-no-early-exit \
+; RUN: -polly-analyze-read-only-scalars=false -polly-codegen -S < %s | \
+; RUN: FileCheck %s
+
+; RUN: opt %loadPolly -polly-detect-unprofitable -polly-no-early-exit \
+; RUN: -polly-analyze-read-only-scalars=true -polly-codegen -S < %s | \
+; RUN: FileCheck %s
+
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
 ; Function Attrs: nounwind uwtable
@@ -58,7 +65,7 @@ attributes #1 = { nounwind readnone }
 !1 = !DIFile(filename: "loop.c", directory: "/home/grosser/Projects/polly/git/tools/polly")
 !2 = !{}
 !3 = !{!4}
-!4 = !DISubprogram(name: "foo", line: 1, isLocal: false, isDefinition: true, virtualIndex: 6, flags: DIFlagPrototyped, isOptimized: false, scopeLine: 1, file: !1, scope: !5, type: !6, function: void (float*, i64)* @foo, variables: !2)
+!4 = distinct !DISubprogram(name: "foo", line: 1, isLocal: false, isDefinition: true, virtualIndex: 6, flags: DIFlagPrototyped, isOptimized: false, scopeLine: 1, file: !1, scope: !5, type: !6, function: void (float*, i64)* @foo, variables: !2)
 !5 = !DIFile(filename: "loop.c", directory: "/home/grosser/Projects/polly/git/tools/polly")
 !6 = !DISubroutineType(types: !7)
 !7 = !{null, !8, !10}

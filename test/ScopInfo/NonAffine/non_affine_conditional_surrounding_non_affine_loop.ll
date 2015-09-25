@@ -1,11 +1,19 @@
-; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine-branches -polly-allow-nonaffine-loops=true -analyze < %s | FileCheck %s --check-prefix=INNERMOST
-; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine -polly-allow-nonaffine-branches -polly-allow-nonaffine-loops=true -analyze < %s | FileCheck %s --check-prefix=ALL
+; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine-branches \
+; RUN:     -polly-allow-nonaffine-loops=true -polly-detect-unprofitable \
+; RUN:     -analyze < %s | FileCheck %s --check-prefix=INNERMOST
+; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine \
+; RUN:     -polly-allow-nonaffine-branches -polly-allow-nonaffine-loops=true \
+; RUN:     -analyze < %s | FileCheck %s --check-prefix=ALL
 ;
 ; INNERMOST:    Function: f
 ; INNERMOST:    Region: %bb9---%bb18
 ; INNERMOST:    Max Loop Depth:  1
 ; INNERMOST:    Context:
-; INNERMOST:    [p_0] -> {  : p_0 >= -2199023255552 and p_0 <= 2199023254528 }
+; INNERMOST:    [p_0] -> {  :
+; INNERMOST-DAG:   p_0 >= -2199023255552
+; INNERMOST-DAG:    and 
+; INNERMOST-DAG:   p_0 <= 2199023254528
+; INNERMOST:             }
 ; INNERMOST:    Assumed Context:
 ; INNERMOST:    [p_0] -> {  :  }
 ; INNERMOST:    p0: {0,+,(sext i32 %N to i64)}<%bb3>
@@ -14,7 +22,11 @@
 ; INNERMOST:    Statements {
 ; INNERMOST:      Stmt_bb12
 ; INNERMOST:            Domain :=
-; INNERMOST:                [p_0] -> { Stmt_bb12[i0] : i0 >= 0 and p_0 >= 1 and i0 <= -1 + p_0 };
+; INNERMOST:                [p_0] -> { Stmt_bb12[i0] :
+; INNERMOST-DAG:                i0 >= 0
+; INNERMOST-DAG:              and
+; INNERMOST-DAG:                i0 <= -1 + p_0
+; INNERMOST:                  }
 ; INNERMOST:            Schedule :=
 ; INNERMOST:                [p_0] -> { Stmt_bb12[i0] -> [i0] };
 ; INNERMOST:            ReadAccess := [Reduction Type: +] [Scalar: 0]
@@ -35,7 +47,11 @@
 ; ALL:    Statements {
 ; ALL:      Stmt_bb4__TO__bb18
 ; ALL:            Domain :=
-; ALL:                { Stmt_bb4__TO__bb18[i0] : i0 >= 0 and i0 <= 1023 };
+; ALL:                { Stmt_bb4__TO__bb18[i0] :
+; ALL-DAG:               i0 >= 0
+; ALL-DAG:             and
+; ALL-DAG:               i0 <= 1023
+; ALL:                }
 ; ALL:            Schedule :=
 ; ALL:                { Stmt_bb4__TO__bb18[i0] -> [i0] };
 ; ALL:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]

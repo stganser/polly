@@ -27,7 +27,6 @@
 #include "polly/Options.h"
 #include "polly/ScopDetection.h"
 #include "polly/ScopInfo.h"
-#include "polly/TempScopInfo.h"
 #include "llvm/Analysis/CFGPrinter.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
@@ -62,7 +61,7 @@ static cl::opt<PassPositionChoice> PassPosition(
     cl::values(
         clEnumValN(POSITION_EARLY, "early", "Before everything"),
         clEnumValN(POSITION_AFTER_LOOPOPT, "after-loopopt",
-                   "After the loop optimizer (but within the inline zycle)"),
+                   "After the loop optimizer (but within the inline cycle)"),
         clEnumValN(POSITION_BEFORE_VECTORIZER, "before-vectorizer",
                    "Right before the vectorizer"),
         clEnumValEnd),
@@ -163,7 +162,6 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializePollyCanonicalizePass(Registry);
   initializeScopDetectionPass(Registry);
   initializeScopInfoPass(Registry);
-  initializeTempScopInfoPass(Registry);
 }
 
 /// @brief Register Polly passes such that they form a polyhedral optimizer.

@@ -55,6 +55,34 @@ if (NOT DEFINED LLVM_MAIN_SRC_DIR)
                   OUTPUT_STRIP_TRAILING_WHITESPACE)
   set(CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS} ${LLVM_CXX_FLAGS})
 
+  # Check LLVM_ENABLE_ASSERTIONS
+  execute_process(COMMAND "${LLVM_INSTALL_ROOT}/bin/llvm-config" --assertion-mode
+                  OUTPUT_VARIABLE LLVM_ENABLE_ASSERTIONS
+                  OUTPUT_STRIP_TRAILING_WHITESPACE)
+  # Copied from LLVM's HandleLLVMOptions.cmake
+  if( LLVM_ENABLE_ASSERTIONS )
+    # MSVC doesn't like _DEBUG on release builds. See PR 4379.
+    if( NOT MSVC )
+      add_definitions( -D_DEBUG )
+    endif()
+    # On non-Debug builds cmake automatically defines NDEBUG, so we
+    # explicitly undefine it:
+    if( NOT uppercase_CMAKE_BUILD_TYPE STREQUAL "DEBUG" )
+      add_definitions( -UNDEBUG )
+      # Also remove /D NDEBUG to avoid MSVC warnings about conflicting defines.
+      foreach (flags_var_to_scrub
+          CMAKE_CXX_FLAGS_RELEASE
+          CMAKE_CXX_FLAGS_RELWITHDEBINFO
+          CMAKE_CXX_FLAGS_MINSIZEREL
+          CMAKE_C_FLAGS_RELEASE
+          CMAKE_C_FLAGS_RELWITHDEBINFO
+          CMAKE_C_FLAGS_MINSIZEREL)
+        string (REGEX REPLACE "(^| )[/-]D *NDEBUG($| )" " "
+          "${flags_var_to_scrub}" "${${flags_var_to_scrub}}")
+      endforeach()
+    endif()
+  endif()
+
   # Make sure the isl c files are built as fPIC
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
 endif(NOT DEFINED LLVM_MAIN_SRC_DIR)
@@ -82,21 +110,6 @@ else ()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti")
 endif ()
 
-# Define the FLAGS for the compilation of isl and imath
-#
-# Those are the only C files we have in the repository. Hence, we can just use
-# the CFLAGS to identify them.
-#
-# We first set the visibility of all isl functions to hidden to ensure we do
-# not clash with other isl versions that got linked into a program that uses
-# Polly. (This happens e.g when linking Polly with dragonegg)
-#
-# We also disable all warnings, as these should be fixed upstream. There is
-# no value in reporting them here.
-if (NOT MSVC)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fvisibility=hidden -w")
-endif ()
-
 # Add path for custom modules
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${POLLY_SOURCE_DIR}/cmake")
 
@@ -120,10 +133,7 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/lib/JSON/include
   ${CMAKE_CURRENT_BINARY_DIR}/lib/External/isl/include
-  ${CMAKE_CURRENT_BINARY_DIR}/lib/External/isl
   ${CMAKE_CURRENT_SOURCE_DIR}/lib/External/isl/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/lib/External/isl/imath
-  ${CMAKE_CURRENT_SOURCE_DIR}/lib/External/isl
   ${CMAKE_CURRENT_BINARY_DIR}/include
   )
 
@@ -160,15 +170,32 @@ file( GLOB_RECURSE islfiles lib/External/isl/*.h lib/External/isl/*.c
                    lib/External/isl/include/isl/*.h lib/External/isl/imath/*.h
                    lib/External/isl/imath/*.c)
 list( REMOVE_ITEM files ${jsonfiles} ${islfiles})
-add_custom_command( OUTPUT formatting COMMAND
-  CLANG_FORMAT=${LLVM_BINARY_DIR}/bin/clang-format
-  ${CMAKE_CURRENT_SOURCE_DIR}/utils/check_format.sh ${files})
-add_custom_target(polly-check-format DEPENDS formatting)
+
+set(check_format_depends)
+set(update_format_depends)
+set(i 0)
+foreach (file IN LISTS files)
+  add_custom_command(OUTPUT polly-check-format${i}
+    COMMAND clang-format -style=llvm ${file} | diff -u ${file} -
+    VERBATIM
+    COMMENT "Checking format of ${file}..."
+  )
+  list(APPEND check_format_depends "polly-check-format${i}")
+
+  add_custom_command(OUTPUT polly-update-format${i}
+    COMMAND clang-format -i -style=llvm ${file}
+    VERBATIM
+    COMMENT "Updating format of ${file}..."
+  )
+  list(APPEND update_format_depends "polly-update-format${i}")
+
+  math(EXPR i ${i}+1)
+endforeach ()
+
+add_custom_target(polly-check-format DEPENDS ${check_format_depends})
 set_target_properties(polly-check-format PROPERTIES FOLDER "Polly")
-add_custom_command( OUTPUT formatting-update COMMAND
-  CLANG_FORMAT=${LLVM_BINARY_DIR}/bin/clang-format
-  ${CMAKE_CURRENT_SOURCE_DIR}/utils/update_format.sh ${files})
-add_custom_target(polly-update-format DEPENDS formatting-update)
+
+add_custom_target(polly-update-format DEPENDS ${update_format_depends})
 set_target_properties(polly-update-format PROPERTIES FOLDER "Polly")
 
 # Set the variable POLLY_LINK_LIBS in the llvm/tools/ dir.

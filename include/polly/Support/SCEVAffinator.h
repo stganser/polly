@@ -34,6 +34,8 @@ struct isl_schedule;
 
 namespace llvm {
 class Region;
+class BasicBlock;
+class DataLayout;
 class ScalarEvolution;
 }
 
@@ -49,17 +51,27 @@ public:
 
   /// @brief Translate a SCEV to an isl_pw_aff.
   ///
-  /// @param E    The expression that is translated.
-  /// @param Stmt The SCoP statement surrounding @p E or nullptr, if no
-  ///             loop induction variables inside the scop are referenced.
+  /// @param E  he expression that is translated.
+  /// @param BB The block in which @p E is executed.
   ///
-  /// @returns The isl representation of the SCEV @p E in @p Stmt.
+  /// @returns The isl representation of the SCEV @p E in @p Domain.
   __isl_give isl_pw_aff *getPwAff(const llvm::SCEV *E,
-                                  const ScopStmt *Stmt = nullptr);
+                                  llvm::BasicBlock *BB = nullptr);
+
+  /// @brief Compute the context in which integer wrapping is happending.
+  ///
+  /// This context contains all parameter configurations for which we
+  /// know that the wrapping and non-wrapping expressions are different.
+  ///
+  /// @returns The context in which integer wrapping is happening.
+  __isl_give isl_set *getWrappingContext() const;
+
+  /// @brief Check an <nsw> AddRec for the loop @p L is cached.
+  bool hasNSWAddRecForLoop(llvm::Loop *L) const;
 
 private:
   /// @brief Key to identify cached expressions.
-  using CacheKey = std::pair<const llvm::SCEV *, const ScopStmt *>;
+  using CacheKey = std::pair<const llvm::SCEV *, llvm::BasicBlock *>;
 
   /// @brief Map to remembered cached expressions.
   llvm::DenseMap<CacheKey, isl_pw_aff *> CachedExpressions;
@@ -69,9 +81,28 @@ private:
   unsigned NumIterators;
   const llvm::Region &R;
   llvm::ScalarEvolution &SE;
-  const ScopStmt *Stmt;
+  llvm::BasicBlock *BB;
 
-  int getLoopDepth(const llvm::Loop *L);
+  /// @brief Target data for element size computing.
+  const llvm::DataLayout &TD;
+
+  /// @brief Compute the non-wrapping version of @p PWA for type @p ExprType.
+  ///
+  /// @param PWA  The piece-wise affine function that might wrap.
+  /// @param Type The type of the SCEV that was translated to @p PWA.
+  ///
+  /// @returns The expr @p PWA modulo the size constraints of @p ExprType.
+  __isl_give isl_pw_aff *addModuloSemantic(__isl_take isl_pw_aff *PWA,
+                                           llvm::Type *ExprType) const;
+
+  /// @brief Compute the context in which integer wrapping for @p PWA happens.
+  ///
+  /// @returns The context in which integer wrapping happens or nullptr if
+  /// empty.
+  __isl_give isl_set *getWrappingContext(llvm::SCEV::NoWrapFlags Flags,
+                                         llvm::Type *ExprType,
+                                         __isl_keep isl_pw_aff *PWA,
+                                         __isl_keep isl_set *ExprDomain) const;
 
   __isl_give isl_pw_aff *visit(const llvm::SCEV *E);
   __isl_give isl_pw_aff *visitConstant(const llvm::SCEVConstant *E);

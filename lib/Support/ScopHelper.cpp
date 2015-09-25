@@ -28,36 +28,6 @@ using namespace polly;
 
 #define DEBUG_TYPE "polly-scop-helper"
 
-// Helper function for Scop
-// TODO: Add assertion to not allow parameter to be null
-//===----------------------------------------------------------------------===//
-// Temporary Hack for extended region tree.
-// Cast the region to loop if there is a loop have the same header and exit.
-Loop *polly::castToLoop(const Region &R, LoopInfo &LI) {
-  BasicBlock *entry = R.getEntry();
-
-  if (!LI.isLoopHeader(entry))
-    return 0;
-
-  Loop *L = LI.getLoopFor(entry);
-
-  BasicBlock *exit = L->getExitBlock();
-
-  // Is the loop with multiple exits?
-  if (!exit)
-    return 0;
-
-  if (exit != R.getExit()) {
-    // SubRegion/ParentRegion with the same entry.
-    assert((R.getNode(R.getEntry())->isSubRegion() ||
-            R.getParent()->getEntry() == entry) &&
-           "Expect the loop is the smaller or bigger region");
-    return 0;
-  }
-
-  return L;
-}
-
 Value *polly::getPointerOperand(Instruction &Inst) {
   if (LoadInst *load = dyn_cast<LoadInst>(&Inst))
     return load->getPointerOperand();
@@ -360,4 +330,18 @@ Value *polly::expandCodeFor(Scop &S, ScalarEvolution &SE, const DataLayout &DL,
                             Instruction *IP) {
   ScopExpander Expander(S.getRegion(), SE, DL, Name);
   return Expander.expandCodeFor(E, Ty, IP);
+}
+
+bool polly::isErrorBlock(BasicBlock &BB) {
+
+  for (Instruction &Inst : BB)
+    if (CallInst *CI = dyn_cast<CallInst>(&Inst))
+      if (Function *F = CI->getCalledFunction())
+        if (F->getName().equals("__ubsan_handle_out_of_bounds"))
+          return true;
+
+  if (isa<UnreachableInst>(BB.getTerminator()))
+    return true;
+
+  return false;
 }
