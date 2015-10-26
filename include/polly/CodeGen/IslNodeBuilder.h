@@ -16,6 +16,7 @@
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/IslExprBuilder.h"
 #include "polly/CodeGen/LoopGenerators.h"
+#include "polly/ScopInfo.h"
 #include "isl/ctx.h"
 #include "isl/union_map.h"
 
@@ -41,6 +42,9 @@ public:
 
   void addParameters(__isl_take isl_set *Context);
   void create(__isl_take isl_ast_node *Node);
+
+  /// @brief Preload all memory loads that are invariant.
+  void preloadInvariantLoads();
 
   /// @brief Finalize code generation for the SCoP @p S.
   ///
@@ -75,8 +79,6 @@ protected:
   BlockGenerator::EscapeUsersAllocaMapTy EscapeMap;
 
   ///@}
-  ///
-  ValueToValueMap GlobalMap;
 
   /// @brief The generator used to copy a basic block.
   BlockGenerator BlockGen;
@@ -114,7 +116,16 @@ protected:
   ///
   /// When generating new code for a ScopStmt this map is used to map certain
   /// llvm::Values to new llvm::Values.
-  polly::ValueMapT ValueMap;
+  ValueMapT ValueMap;
+
+  /// @brief Materialize code for @p Id if it was not done before.
+  void materializeValue(__isl_take isl_id *Id);
+
+  /// @brief Materialize parameters of @p Set.
+  ///
+  /// @param All If not set only parameters referred to by the constraints in
+  ///            @p Set will be materialized, otherwise all.
+  void materializeParameters(__isl_take isl_set *Set, bool All);
 
   // Extract the upper bound of this loop
   //
@@ -181,7 +192,7 @@ protected:
   /// pass down certain values.
   ///
   /// @param NewValues A map that maps certain llvm::Values to new llvm::Values.
-  void updateValues(ParallelLoopGenerator::ValueToValueMapTy &NewValues);
+  void updateValues(ValueMapT &NewValues);
 
   /// @brief Generate code for a marker now.
   ///
@@ -192,6 +203,33 @@ protected:
   /// @param Mark The node we generate code for.
   virtual void createMark(__isl_take isl_ast_node *Marker);
   virtual void createFor(__isl_take isl_ast_node *For);
+
+  /// @brief Preload the memory access at @p AccessRange with @p Build.
+  ///
+  /// @returns The preloaded value casted to type @p Ty
+  Value *preloadUnconditionally(__isl_take isl_set *AccessRange,
+                                isl_ast_build *Build, Type *Ty);
+
+  /// @brief Preload the memory load access @p MA.
+  ///
+  /// If @p MA is not always executed it will be conditionally loaded and
+  /// merged with undef from the same type. Hence, if @p MA is executed only
+  /// under condition C then the preload code will look like this:
+  ///
+  /// MA_preload = undef;
+  /// if (C)
+  ///   MA_preload = load MA;
+  /// use MA_preload
+  Value *preloadInvariantLoad(const MemoryAccess &MA,
+                              __isl_take isl_set *Domain);
+
+  /// @brief Preload the invariant access equivalence class @p IAClass
+  ///
+  /// This function will preload the representing load from @p IAClass and
+  /// map all members of @p IAClass to that preloaded value, potentially casted
+  /// to the required type.
+  void preloadInvariantEquivClass(const InvariantEquivClassTy &IAClass);
+
   void createForVector(__isl_take isl_ast_node *For, int VectorWidth);
   void createForSequential(__isl_take isl_ast_node *For);
 

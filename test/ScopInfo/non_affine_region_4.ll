@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops  -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-scops  -analyze < %s | FileCheck %s
 ;
 ; Verify that both scalars (x and y) are properly written in the non-affine
 ; region and read afterwards.
@@ -39,9 +39,9 @@
 ; CHECK:                { Stmt_bb2__TO__bb7[i0] -> MemRef_A[i0] };
 ; CHECK:            MustWriteAccess :=  [Reduction Type: NONE] [Scalar: 1]
 ; CHECK:                { Stmt_bb2__TO__bb7[i0] -> MemRef_x[] };
-; CHECK:            MustWriteAccess :=  [Reduction Type: NONE] [Scalar: 1]
-; CHECK:                { Stmt_bb2__TO__bb7[i0] -> MemRef_y__phi[] };
 ; CHECK:            MayWriteAccess := [Reduction Type: NONE] [Scalar: 1]
+; CHECK:                { Stmt_bb2__TO__bb7[i0] -> MemRef_y__phi[] };
+; CHECK:            MustWriteAccess :=  [Reduction Type: NONE] [Scalar: 1]
 ; CHECK:                { Stmt_bb2__TO__bb7[i0] -> MemRef_y__phi[] };
 ; CHECK:      Stmt_bb7
 ; CHECK:            Domain :=

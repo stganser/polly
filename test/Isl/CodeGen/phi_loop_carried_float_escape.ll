@@ -1,7 +1,7 @@
-; RUN: opt %loadPolly -S -polly-no-early-exit -polly-detect-unprofitable \
+; RUN: opt %loadPolly -S \
 ; RUN: -polly-analyze-read-only-scalars=false -polly-codegen < %s | FileCheck %s
 
-; RUN: opt %loadPolly -S -polly-no-early-exit -polly-detect-unprofitable \
+; RUN: opt %loadPolly -S \
 ; RUN: -polly-analyze-read-only-scalars=true -polly-codegen < %s | FileCheck %s
 ;
 ;    float f(float *A, int N) {
@@ -16,6 +16,7 @@
 ; CHECK-NEXT:    br label %exit
 
 ; CHECK-LABEL: polly.start:
+; CHECK-NEXT:    sext
 ; CHECK-NEXT:    store float 0.000000e+00, float* %tmp.0.phiops
 
 ; CHECK-LABEL: polly.merge2:
@@ -27,8 +28,8 @@
 ; CHECK-:        store float %tmp.0.phiops.reload[[R1]], float* %tmp.0.s2a
 
 ; CHECK-LABEL: polly.stmt.bb4:
-; CHECK:         %tmp[[R5:[0-9]*]]_p_scalar_ = load float, float* %scevgep, align 4, !alias.scope !0, !noalias !2
 ; CHECK:         %tmp.0.s2a.reload[[R3:[0-9]*]] = load float, float* %tmp.0.s2a
+; CHECK:         %tmp[[R5:[0-9]*]]_p_scalar_ = load float, float* %scevgep, align 4, !alias.scope !0, !noalias !2
 ; CHECK:         %p_tmp[[R4:[0-9]*]] = fadd float %tmp.0.s2a.reload[[R3]], %tmp[[R5]]_p_scalar_
 ; CHECK:         store float %p_tmp[[R4]], float* %tmp.0.phiops
 

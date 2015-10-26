@@ -1,8 +1,15 @@
-; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine-branches -polly-allow-nonaffine-loops -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-scops \
+; RUN:     -polly-allow-nonaffine-branches -polly-allow-nonaffine-loops \
+; RUN:     -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine-branches \
+; RUN:     -polly-process-unprofitable=false \
+; RUN:     -polly-allow-nonaffine-loops -analyze < %s | FileCheck %s \
+; RUN:     --check-prefix=PROFIT
 
 
 ; RUN: opt %loadPolly -polly-scops -polly-detect-reductions \
 ; RUN:                -polly-allow-nonaffine-branches \
+; RUN:                \
 ; RUN:                -polly-allow-nonaffine-loops -analyze < %s \
 ; RUN:                -polly-detect-reductions=false \
 ; RUN: | FileCheck %s -check-prefix=NO-REDUCTION
@@ -34,6 +41,8 @@
 ; CHECK:            MayWriteAccess :=  [Reduction Type: +] [Scalar: 0]
 ; CHECK:                { Stmt_bb3__TO__bb10[i0] -> MemRef_A[i0] };
 ; CHECK:    }
+
+; PROFIT-NOT: Statements
 
 ; NO-REDUCTION-NOT: Reduction Type: +
 

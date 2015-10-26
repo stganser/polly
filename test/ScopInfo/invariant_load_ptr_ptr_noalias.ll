@@ -1,5 +1,16 @@
 ; RUN: opt %loadPolly -tbaa -polly-scops -polly-ignore-aliasing \
-; RUN:                -polly-detect-unprofitable -analyze < %s | FileCheck %s
+; RUN:                -analyze < %s | FileCheck %s
+;
+; Note: The order of the invariant accesses is important because A is the
+;       base pointer of tmp3 and we will generate code in the same order as
+;       the invariant accesses are listed here.
+;
+; CHECK: Invariant Accesses: {
+; CHECK:    ReadAccess := [Reduction Type: NONE] [Scalar: 0]
+; CHECK:         MemRef_A[42]
+; CHECK:    ReadAccess := [Reduction Type: NONE] [Scalar: 0]
+; CHECK:         MemRef_tmp3[32]
+; CHECK: }
 ;
 ; CHECK: Arrays {
 ; CHECK:   i32** MemRef_A[*][8]
@@ -31,11 +42,11 @@ bb1:                                              ; preds = %bb7, %bb
 
 bb2:                                              ; preds = %bb1
   %tmp = getelementptr inbounds i32**, i32*** %A, i64 42
-  %tmp3 = load i32**, i32*** %tmp, align 8, !tbaa !1
+  %tmp3 = load i32**, i32*** %tmp, align 8
   %tmp4 = getelementptr inbounds i32*, i32** %tmp3, i64 32
-  %tmp5 = load i32*, i32** %tmp4, align 8, !tbaa !1
+  %tmp5 = load i32*, i32** %tmp4, align 8
   %tmp6 = getelementptr inbounds i32, i32* %tmp5, i64 %indvars.iv
-  store i32 0, i32* %tmp6, align 4, !tbaa !5
+  store i32 0, i32* %tmp6, align 4
   br label %bb7
 
 bb7:                                              ; preds = %bb2
@@ -45,11 +56,3 @@ bb7:                                              ; preds = %bb2
 bb8:                                              ; preds = %bb1
   ret void
 }
-
-!0 = !{!"clang version 3.8.0 (http://llvm.org/git/clang.git 9e282ff441e7a367dc711e41fd19d27ffc0f78d6)"}
-!1 = !{!2, !2, i64 0}
-!2 = !{!"any pointer", !3, i64 0}
-!3 = !{!"omnipotent char", !4, i64 0}
-!4 = !{!"Simple C/C++ TBAA"}
-!5 = !{!6, !6, i64 0}
-!6 = !{!"int", !3, i64 0}

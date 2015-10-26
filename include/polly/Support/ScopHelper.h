@@ -14,9 +14,14 @@
 #ifndef POLLY_SUPPORT_IRHELPER_H
 #define POLLY_SUPPORT_IRHELPER_H
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/IR/ValueHandle.h"
+
 namespace llvm {
 class Type;
 class Instruction;
+class LoadInst;
 class LoopInfo;
 class Loop;
 class ScalarEvolution;
@@ -30,21 +35,19 @@ class StringRef;
 class DataLayout;
 class DominatorTree;
 class RegionInfo;
+class TerminatorInst;
 class ScalarEvolution;
 }
 
 namespace polly {
 class Scop;
-/// Temporary Hack for extended regiontree.
-///
-/// @brief Cast the region to loop.
-///
-/// @param R  The Region to be casted.
-/// @param LI The LoopInfo to help the casting.
-///
-/// @return If there is a a loop that has the same entry and exit as the region,
-///         return the loop, otherwise, return null.
-llvm::Loop *castToLoop(const llvm::Region &R, llvm::LoopInfo &LI);
+
+/// @brief Type to remap values.
+using ValueMapT = llvm::DenseMap<llvm::AssertingVH<llvm::Value>,
+                                 llvm::AssertingVH<llvm::Value>>;
+
+/// @brief Type for a set of invariant loads.
+using InvariantLoadsSetTy = llvm::SetVector<llvm::AssertingVH<llvm::LoadInst>>;
 
 /// @brief Check if the PHINode has any incoming Invoke edge.
 ///
@@ -95,10 +98,11 @@ void splitEntryBlockForAlloca(llvm::BasicBlock *EntryBlock, llvm::Pass *P);
 /// @param E    The expression for which code is actually generated.
 /// @param Ty   The type of the resulting code.
 /// @param IP   The insertion point for the new code.
+/// @param VMap A remaping of values used in @p E.
 llvm::Value *expandCodeFor(Scop &S, llvm::ScalarEvolution &SE,
                            const llvm::DataLayout &DL, const char *Name,
                            const llvm::SCEV *E, llvm::Type *Ty,
-                           llvm::Instruction *IP);
+                           llvm::Instruction *IP, ValueMapT *VMap = nullptr);
 
 /// @brief Check if the block is a error block.
 ///
@@ -106,12 +110,59 @@ llvm::Value *expandCodeFor(Scop &S, llvm::ScalarEvolution &SE,
 /// the following conditions:
 ///
 ///  - It is terminated by an unreachable instruction
-///  - It contains a call to a function named:
-///     + __ubsan_handle_out_of_bounds
+///  - It contains a call to a non-pure function that is not immediately
+///    dominated by a loop header and that does not dominate the region exit.
+///    This is a heuristic to pick only error blocks that are conditionally
+///    executed and can be assumed to be not executed at all without the domains
+///    beeing available.
 ///
 /// @param BB The block to check.
+/// @param R  The analyzed region.
+/// @param LI The loop info analysis.
+/// @param DT The dominator tree of the function.
 ///
 /// @return True if the block is a error block, false otherwise.
-bool isErrorBlock(llvm::BasicBlock &BB);
+bool isErrorBlock(llvm::BasicBlock &BB, const llvm::Region &R,
+                  llvm::LoopInfo &LI, const llvm::DominatorTree &DT);
+
+/// @brief Return the condition for the terminator @p TI.
+///
+/// For unconditional branches the "i1 true" condition will be returned.
+///
+/// @param TI The terminator to get the condition from.
+///
+/// @return The condition of @p TI and nullptr if none could be extracted.
+llvm::Value *getConditionFromTerminator(llvm::TerminatorInst *TI);
+
+/// @brief Check if @p LInst can be hoisted in @p R.
+///
+/// @param LInst The load to check.
+/// @param R     The analyzed region.
+/// @param LI    The loop info.
+/// @param SE    The scalar evolution analysis.
+///
+/// @return True if @p LInst can be hoisted in @p R.
+bool isHoistableLoad(llvm::LoadInst *LInst, llvm::Region &R, llvm::LoopInfo &LI,
+                     llvm::ScalarEvolution &SE);
+
+/// @brief Return true iff @p V is an intrinsic that we ignore during code
+///        generation.
+bool isIgnoredIntrinsic(const llvm::Value *V);
+
+/// @brief Check whether a value an be synthesized by the code generator.
+///
+/// Some value will be recalculated only from information that is code generated
+/// from the polyhedral representation. For such instructions we do not need to
+/// ensure that their operands are available during code generation.
+///
+/// @param V The value to check.
+/// @param LI The LoopInfo analysis.
+/// @param SE The scalar evolution database.
+/// @param R The region out of which SSA names are parameters.
+/// @return If the instruction I can be regenerated from its
+///         scalar evolution representation, return true,
+///         otherwise return false.
+bool canSynthesize(const llvm::Value *V, const llvm::LoopInfo *LI,
+                   llvm::ScalarEvolution *SE, const llvm::Region *R);
 }
 #endif

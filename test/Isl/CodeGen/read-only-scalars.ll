@@ -1,8 +1,8 @@
 ; RUN: opt %loadPolly -polly-analyze-read-only-scalars=false -polly-codegen \
-; RUN:     -polly-no-early-exit -polly-detect-unprofitable \
+; RUN:     \
 ; RUN:     -S < %s | FileCheck %s
 ; RUN: opt %loadPolly -polly-analyze-read-only-scalars=true -polly-codegen \
-; RUN:     -polly-no-early-exit -polly-detect-unprofitable \
+; RUN:     \
 ; RUN:     -S < %s | FileCheck %s -check-prefix=SCALAR
 
 ; CHECK-NOT: alloca
@@ -14,8 +14,8 @@
 ; SCALAR-NEXT:  store float %scalar, float* %scalar.s2a
 
 ; SCALAR-LABEL: polly.stmt.stmt1:
-; SCALAR-NEXT:  %val_p_scalar_ = load float, float* %A,
 ; SCALAR-NEXT:  %scalar.s2a.reload = load float, float* %scalar.s2a
+; SCALAR-NEXT:  %val_p_scalar_ = load float, float* %A,
 ; SCALAR-NEXT:  %p_sum = fadd float %val_p_scalar_, %scalar.s2a.reload
 
 define void @foo(float* noalias %A, float %scalar) {

@@ -28,8 +28,8 @@
 #include "isl/aff.h"
 #include "isl/ctx.h"
 
-#include <forward_list>
 #include <deque>
+#include <forward_list>
 
 using namespace llvm;
 
@@ -63,25 +63,6 @@ class MemoryAccess;
 class Scop;
 class ScopStmt;
 class ScopInfo;
-class Comparison;
-class SCEVAffFunc;
-
-class Comparison {
-  const SCEV *LHS;
-  const SCEV *RHS;
-
-  ICmpInst::Predicate Pred;
-
-public:
-  Comparison(const SCEV *LHS, const SCEV *RHS, ICmpInst::Predicate Pred)
-      : LHS(LHS), RHS(RHS), Pred(Pred) {}
-
-  const SCEV *getLHS() const { return LHS; }
-  const SCEV *getRHS() const { return RHS; }
-
-  ICmpInst::Predicate getPred() const { return Pred; }
-  void print(raw_ostream &OS) const;
-};
 
 //===---------------------------------------------------------------------===//
 
@@ -114,8 +95,21 @@ public:
   ScopArrayInfo(Value *BasePtr, Type *ElementType, isl_ctx *IslCtx,
                 ArrayRef<const SCEV *> DimensionSizes, bool IsPHI, Scop *S);
 
+  ///  @brief Update the sizes of the ScopArrayInfo object.
+  ///
+  ///  A ScopArrayInfo object may with certain outer dimensions not being added
+  ///  on the first creation. This function allows to update the sizes of the
+  ///  ScopArrayInfo object by adding additional outer array dimensions.
+  ///
+  ///  @param A vector of array sizes where the rightmost array sizes need to
+  ///         match the innermost array sizes already defined in SAI.
+  void updateSizes(ArrayRef<const SCEV *> Sizes);
+
   /// @brief Destructor to free the isl id of the base pointer.
   ~ScopArrayInfo();
+
+  /// @brief Set the base pointer to @p BP.
+  void setBasePtr(Value *BP) { BasePtr = BP; }
 
   /// @brief Return the base pointer.
   Value *getBasePtr() const { return BasePtr; }
@@ -182,6 +176,9 @@ public:
   /// @brief Access the ScopArrayInfo associated with an isl Id.
   static const ScopArrayInfo *getFromId(__isl_take isl_id *Id);
 
+  /// @brief Get the space of this array access.
+  __isl_give isl_space *getSpace() const;
+
 private:
   void addDerivedSAI(ScopArrayInfo *DerivedSAI) {
     DerivedSAIs.insert(DerivedSAI);
@@ -194,7 +191,7 @@ private:
   SmallPtrSet<ScopArrayInfo *, 2> DerivedSAIs;
 
   /// @brief The base pointer.
-  Value *BasePtr;
+  AssertingVH<Value> BasePtr;
 
   /// @brief The type of the elements stored in this array.
   Type *ElementType;
@@ -210,6 +207,9 @@ private:
 
   /// @brief Is this PHI node specific storage?
   bool IsPHI;
+
+  /// @brief The scop this SAI object belongs to.
+  Scop &S;
 };
 
 /// @brief Represent memory accesses in statements.
@@ -218,6 +218,106 @@ class MemoryAccess {
   friend class ScopStmt;
 
 public:
+  /// @brief Description of the cause of a MemoryAccess being added.
+  ///
+  /// We distinguish between explicit and implicit accesses. Explicit are those
+  /// for which there is a load or store instruction in the analyzed IR.
+  /// Implicit accesses are derived from defintions and uses of llvm::Values.
+  /// The polyhedral model has no notion of such values or SSA form, hence they
+  /// are modeled "as if" they were accesses to zero-dimensional arrays even if
+  /// they do represent accesses to (main) memory in the analyzed IR code. The
+  /// actual memory for the zero-dimensional arrays is only created using
+  /// allocas at CodeGeneration, with suffixes (currently ".s2a" and ".phiops")
+  /// added to the value's name. To describe how def/uses are modeled using
+  /// accesses we use these these suffixes here as well.
+  /// There are currently three separate kinds of access origins:
+  ///
+  ///
+  /// * Explicit access
+  ///
+  /// Memory is accessed by either a load (READ) or store (*_WRITE) found in the
+  /// IR. #AccessInst is the LoadInst respectively StoreInst. The #BaseAddr is
+  /// the array pointer being accesses without subscript. #AccessValue is the
+  /// llvm::Value the StoreInst writes, respectively the result of the LoadInst
+  /// (the LoadInst itself).
+  ///
+  ///
+  /// * Accessing an llvm::Value (a scalar)
+  ///
+  /// This is either a *_WRITE for the value's definition (i.e. exactly one per
+  /// llvm::Value) or a READ when the scalar is used in a different
+  /// BasicBlock. For instance, a use/def chain of such as %V in
+  ///              ______________________
+  ///              |DefBB:              |
+  ///              |  %V = float op ... |
+  ///              ----------------------
+  ///               |                  |
+  /// _________________               _________________
+  /// |UseBB1:        |               |UseBB2:        |
+  /// |  use float %V |               |  use float %V |
+  /// -----------------               -----------------
+  ///
+  /// is modeled as if the accesses had occured this way:
+  ///
+  ///                        __________________________
+  ///                        |entry:                  |
+  ///                        |  %V.s2a = alloca float |
+  ///                        --------------------------
+  ///                                     |
+  ///                    ___________________________________
+  ///                    |DefBB:                           |
+  ///                    |  store %float %V, float* %V.sa2 |
+  ///                    -----------------------------------
+  ///                           |                   |
+  /// ____________________________________  ____________________________________
+  /// |UseBB1:                           |  |UseBB2:                           |
+  /// |  %V.reload1 = load float* %V.s2a |  |  %V.reload2 = load float* %V.s2a |
+  /// |  use float %V.reload1            |  |  use float %V.reload2            |
+  /// ------------------------------------  ------------------------------------
+  ///
+  /// #AccessInst is either the llvm::Value for WRITEs or the value's user for
+  /// READS. The #BaseAddr is represented by the value's definition (i.e. the
+  /// llvm::Value itself) as no such alloca yet exists before CodeGeneration.
+  /// #AccessValue is also the llvm::Value itself.
+  ///
+  ///
+  /// * Accesses to emulate PHI nodes
+  ///
+  /// PHIInst instructions such as
+  ///
+  /// %PHI = phi float [ %Val1, %IncomingBlock1 ], [ %Val2, %IncomingBlock2 ]
+  ///
+  /// are modeled as if the accesses occured this way:
+  ///
+  ///                    _______________________________
+  ///                    |entry:                       |
+  ///                    |  %PHI.phiops = alloca float |
+  ///                    -------------------------------
+  ///                           |              |
+  /// __________________________________  __________________________________
+  /// |IncomingBlock1:                 |  |IncomingBlock2:                 |
+  /// |  ...                           |  |  ...                           |
+  /// |  store float %Val1 %PHI.phiops |  |  store float %Val2 %PHI.phiops |
+  /// |  br label % JoinBlock          |  |  br label %JoinBlock           |
+  /// ----------------------------------  ----------------------------------
+  ///                             \            /
+  ///                              \          /
+  ///               _________________________________________
+  ///               |JoinBlock:                             |
+  ///               |  %PHI = load float, float* PHI.phiops |
+  ///               -----------------------------------------
+  ///
+  /// Since the stores and loads do not exist in the analyzed code, the
+  /// #AccessInst of a load is the PHIInst and a incoming block's terminator for
+  /// stores. The #BaseAddr is represented through the PHINode because there
+  /// also such alloca in the analyzed code. The #AccessValue is represented by
+  /// the PHIInst itself.
+  ///
+  /// Note that there can also be a scalar write access for %PHI if used in a
+  /// different BasicBlock, i.e. there can be a %PHI.phiops as well as a
+  /// %PHI.s2a.
+  enum AccessOrigin { EXPLICIT, SCALAR, PHI };
+
   /// @brief The access type of a memory access
   ///
   /// There are three kind of access types:
@@ -266,8 +366,9 @@ private:
   /// scop statement.
   isl_id *Id;
 
-  /// @brief Is this MemoryAccess modeling special PHI node accesses?
-  bool IsPHI;
+  /// @brief What is modeled by this MemoetyAccess.
+  /// @see AccessOrigin
+  enum AccessOrigin Origin;
 
   /// @brief Whether it a reading or writing access, and if writing, whether it
   /// is conditional (MAY_WRITE).
@@ -307,7 +408,7 @@ private:
   // @{
 
   /// @brief The base address (e.g., A for A[i+j]).
-  Value *BaseAddr;
+  AssertingVH<Value> BaseAddr;
 
   /// @brief An unique name of the accessed array.
   std::string BaseName;
@@ -331,7 +432,7 @@ private:
   ///  - For straight line scalar accesses it is the access instruction itself.
   ///  - For PHI operand accesses it is the operand value.
   ///
-  Value *AccessValue;
+  AssertingVH<Value> AccessValue;
 
   /// @brief Are all the subscripts affine expression?
   bool IsAffine;
@@ -349,11 +450,6 @@ private:
   unsigned getElemSizeInBytes() const { return ElemBytes; }
 
   bool isAffine() const { return IsAffine; }
-
-  /// @brief Is this MemoryAccess modeling special PHI node accesses?
-  bool isPHI() const { return IsPHI; }
-
-  void setStatement(ScopStmt *Stmt) { this->Statement = Stmt; }
 
   __isl_give isl_basic_map *createBasicAccessMap(ScopStmt *Statement);
 
@@ -415,6 +511,7 @@ private:
 public:
   /// @brief Create a new MemoryAccess.
   ///
+  /// @param Stmt       The parent statement.
   /// @param AccessInst The instruction doing the access.
   /// @param Id         Identifier that is guranteed to be unique within the
   ///                   same ScopStmt.
@@ -422,14 +519,15 @@ public:
   /// @param ElemBytes  Number of accessed bytes.
   /// @param AccType    Whether read or write access.
   /// @param IsAffine   Whether the subscripts are affine expressions.
-  /// @param IsPHI      Are we modeling special PHI node accesses?
+  /// @param Origin     What is the purpose of this access?
   /// @param Subscripts Subscipt expressions
   /// @param Sizes      Dimension lengths of the accessed array.
   /// @param BaseName   Name of the acessed array.
-  MemoryAccess(Instruction *AccessInst, __isl_take isl_id *Id, AccessType Type,
-               Value *BaseAddress, unsigned ElemBytes, bool Affine,
-               ArrayRef<const SCEV *> Subscripts, ArrayRef<const SCEV *> Sizes,
-               Value *AccessValue, bool IsPHI, StringRef BaseName);
+  MemoryAccess(ScopStmt *Stmt, Instruction *AccessInst, __isl_take isl_id *Id,
+               AccessType Type, Value *BaseAddress, unsigned ElemBytes,
+               bool Affine, ArrayRef<const SCEV *> Subscripts,
+               ArrayRef<const SCEV *> Sizes, Value *AccessValue,
+               AccessOrigin Origin, StringRef BaseName);
   ~MemoryAccess();
 
   /// @brief Get the type of a memory access.
@@ -523,8 +621,15 @@ public:
   /// statement.
   bool isStrideZero(__isl_take const isl_map *Schedule) const;
 
-  /// @brief Check if this is a scalar memory access.
-  bool isScalar() const;
+  /// @brief Whether this is an access of an explicit load or store in the IR.
+  bool isExplicit() const { return Origin == EXPLICIT; }
+
+  /// @brief Whether this access represents a register access or models PHI
+  /// nodes.
+  bool isImplicit() const { return !isExplicit(); }
+
+  /// @brief Is this MemoryAccess modeling special PHI node accesses?
+  bool isPHI() const { return Origin == PHI; }
 
   /// @brief Get the statement that contains this memory access.
   ScopStmt *getStatement() const { return Statement; }
@@ -540,6 +645,16 @@ public:
 
   /// @brief Align the parameters in the access relation to the scop context
   void realignParams();
+
+  /// @brief Update the dimensionality of the memory access.
+  ///
+  /// During scop construction some memory accesses may not be constructed with
+  /// their full dimensionality, but outer dimensions that may have been omitted
+  /// if they took the value 'zero'. By updating the dimensionality of the
+  /// statement we add additional zero-valued dimensions to match the
+  /// dimensionality of the ScopArrayInfo object that belongs to this memory
+  /// access.
+  void updateDimensionality();
 
   /// @brief Get identifier for the memory access.
   ///
@@ -559,6 +674,23 @@ public:
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
                               MemoryAccess::ReductionType RT);
 
+/// @brief Ordered list type to hold accesses.
+using MemoryAccessList = std::forward_list<MemoryAccess *>;
+
+/// @brief Type for equivalent invariant accesses and their domain context.
+///
+/// The first element is the SCEV for the pointer/location that identifies this
+/// equivalence class. The second is a list of memory accesses to that location
+/// that are now treated as invariant and hoisted during code generation. The
+/// last element is the execution context under which the invariant memory
+/// location is accessed, hence the union of all domain contexts for the memory
+/// accesses in the list.
+using InvariantEquivClassTy =
+    std::tuple<const SCEV *, MemoryAccessList, isl_set *>;
+
+/// @brief Type for invariant accesses equivalence classes.
+using InvariantEquivClassesTy = SmallVector<InvariantEquivClassTy, 8>;
+
 ///===----------------------------------------------------------------------===//
 /// @brief Statement of the Scop
 ///
@@ -569,9 +701,6 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
 /// At the moment every statement represents a single basic block of LLVM-IR.
 class ScopStmt {
 public:
-  /// @brief List to hold all (scalar) memory accesses mapped to an instruction.
-  using MemoryAccessList = std::forward_list<MemoryAccess *>;
-
   ScopStmt(const ScopStmt &) = delete;
   const ScopStmt &operator=(const ScopStmt &) = delete;
 
@@ -580,6 +709,9 @@ public:
 
   /// Create an overapproximating ScopStmt for the region @p R.
   ScopStmt(Scop &parent, Region &R);
+
+  /// Initialize members after all MemoryAccesses have been added.
+  void init();
 
 private:
   /// Polyhedral description
@@ -649,14 +781,8 @@ private:
   /// @brief Fill NestLoops with loops surrounding this statement.
   void collectSurroundingLoops();
 
-  /// @brief Create the accesses for instructions in @p Block.
-  ///
-  /// @param Block          The basic block for which accesses should be
-  ///                       created.
-  /// @param isApproximated Flag to indicate blocks that might not be executed,
-  ///                       hence for which write accesses need to be modeled as
-  ///                       may-write accesses.
-  void buildAccesses(BasicBlock *Block, bool isApproximated = false);
+  /// @brief Build the access relation of all memory accesses.
+  void buildAccessRelations();
 
   /// @brief Detect and mark reductions in the ScopStmt
   void checkForReductions();
@@ -749,6 +875,9 @@ public:
   /// @brief Return true if this statement represents a whole region.
   bool isRegionStmt() const { return R != nullptr; }
 
+  /// @brief Return true if this statement does not contain any accesses.
+  bool isEmpty() const { return MemAccs.empty(); }
+
   /// @brief Return the (scalar) memory accesses for @p Inst.
   const MemoryAccessList &getAccessesFor(const Instruction *Inst) const {
     MemoryAccessList *MAL = lookupAccessesFor(Inst);
@@ -759,7 +888,9 @@ public:
   /// @brief Return the (scalar) memory accesses for @p Inst if any.
   MemoryAccessList *lookupAccessesFor(const Instruction *Inst) const {
     auto It = InstructionToAccess.find(Inst);
-    return It == InstructionToAccess.end() ? nullptr : It->getSecond();
+    if (It == InstructionToAccess.end())
+      return nullptr;
+    return It->getSecond()->empty() ? nullptr : It->getSecond();
   }
 
   /// @brief Return the __first__ (scalar) memory access for @p Inst.
@@ -772,7 +903,9 @@ public:
   /// @brief Return the __first__ (scalar) memory access for @p Inst if any.
   MemoryAccess *lookupAccessFor(const Instruction *Inst) const {
     auto It = InstructionToAccess.find(Inst);
-    return It == InstructionToAccess.end() ? nullptr : It->getSecond()->front();
+    if (It == InstructionToAccess.end())
+      return nullptr;
+    return It->getSecond()->empty() ? nullptr : It->getSecond()->front();
   }
 
   void setBasicBlock(BasicBlock *Block) {
@@ -781,6 +914,15 @@ public:
     assert(BB && "Cannot set a block for a region statement");
     BB = Block;
   }
+
+  /// @brief Add @p Access to this statement's list of accesses.
+  void addAccess(MemoryAccess *Access);
+
+  /// @brief Remove the memory access in @p InvMAs.
+  ///
+  /// Note that scalar accesses that are caused by any access in @p InvMAs will
+  /// be eliminated too.
+  void removeMemoryAccesses(MemoryAccessList &InvMAs);
 
   typedef MemoryAccessVec::iterator iterator;
   typedef MemoryAccessVec::const_iterator const_iterator;
@@ -874,8 +1016,12 @@ private:
   Scop(const Scop &) = delete;
   const Scop &operator=(const Scop &) = delete;
 
+  LoopInfo &LI;
   DominatorTree &DT;
   ScalarEvolution *SE;
+
+  /// @brief The scop detection analysis.
+  ScopDetection &SD;
 
   /// The underlying Region.
   Region &R;
@@ -892,7 +1038,7 @@ private:
   /// Max loop depth.
   unsigned MaxLoopDepth;
 
-  typedef std::deque<ScopStmt> StmtSet;
+  typedef std::list<ScopStmt> StmtSet;
   /// The statements in this Scop.
   StmtSet Stmts;
 
@@ -919,7 +1065,7 @@ private:
   /// @brief The affinator used to translate SCEVs to isl expressions.
   SCEVAffinator Affinator;
 
-  typedef MapVector<std::pair<const Value *, int>,
+  typedef MapVector<std::pair<AssertingVH<const Value>, int>,
                     std::unique_ptr<ScopArrayInfo>> ArrayInfoMapTy;
   /// @brief A map to remember ScopArrayInfo objects for all base pointers.
   ///
@@ -999,58 +1145,97 @@ private:
   /// group to ensure the SCoP is executed in an alias free environment.
   MinMaxVectorPairVectorTy MinMaxAliasGroups;
 
+  /// @brief Mapping from invariant loads to the representing invariant load of
+  ///        their equivalence class.
+  ValueToValueMap InvEquivClassVMap;
+
+  /// @brief List of invariant accesses.
+  InvariantEquivClassesTy InvariantEquivClasses;
+
   /// @brief Scop constructor; invoked from ScopInfo::buildScop.
-  Scop(Region &R, AccFuncMapType &AccFuncMap, ScalarEvolution &SE,
-       DominatorTree &DT, isl_ctx *ctx, unsigned MaxLoopDepth);
+  Scop(Region &R, AccFuncMapType &AccFuncMap, ScopDetection &SD,
+       ScalarEvolution &SE, DominatorTree &DT, LoopInfo &LI, isl_ctx *ctx,
+       unsigned MaxLoopDepth);
 
   /// @brief Initialize this ScopInfo .
-  void init(LoopInfo &LI, ScopDetection &SD, AliasAnalysis &AA);
+  void init(AliasAnalysis &AA);
 
   /// @brief Add loop carried constraints to the header block of the loop @p L.
   ///
   /// @param L  The loop to process.
-  /// @param LI The LoopInfo analysis.
-  void addLoopBoundsToHeaderDomain(Loop *L, LoopInfo &LI);
+  void addLoopBoundsToHeaderDomain(Loop *L);
 
   /// @brief Compute the branching constraints for each basic block in @p R.
   ///
   /// @param R  The region we currently build branching conditions for.
-  /// @param LI The LoopInfo analysis to obtain the number of iterators.
-  /// @param SD The ScopDetection analysis to identify non-affine sub-regions.
-  /// @param DT The dominator tree of the current function.
-  void buildDomainsWithBranchConstraints(Region *R, LoopInfo &LI,
-                                         ScopDetection &SD, DominatorTree &DT);
+  void buildDomainsWithBranchConstraints(Region *R);
 
   /// @brief Propagate the domain constraints through the region @p R.
   ///
   /// @param R  The region we currently build branching conditions for.
-  /// @param LI The LoopInfo analysis to obtain the number of iterators.
-  /// @param SD The ScopDetection analysis to identify non-affine sub-regions.
-  /// @param DT The dominator tree of the current function.
-  void propagateDomainConstraints(Region *R, LoopInfo &LI, ScopDetection &SD,
-                                  DominatorTree &DT);
+  void propagateDomainConstraints(Region *R);
 
   /// @brief Compute the domain for each basic block in @p R.
   ///
   /// @param R  The region we currently traverse.
-  /// @param LI The LoopInfo analysis to argue about the number of iterators.
-  /// @param SD The ScopDetection analysis to identify non-affine sub-regions.
-  /// @param DT The dominator tree of the current function.
-  void buildDomains(Region *R, LoopInfo &LI, ScopDetection &SD,
-                    DominatorTree &DT);
+  void buildDomains(Region *R);
 
-  /// @brief Check if a basic block is trivial.
+  /// @brief Check if a region part should be represented in the SCoP or not.
   ///
-  /// A trivial basic block does not contain any useful calculation. Therefore,
-  /// it does not need to be represented as a polyhedral statement.
+  /// If @p RN does not contain any useful calculation or is only reachable
+  /// via error blocks we do not model it in the polyhedral representation.
   ///
-  /// @param BB The basic block to check
+  /// @param RN The region part to check.
   ///
-  /// @return True if the basic block is trivial, otherwise false.
-  bool isTrivialBB(BasicBlock *BB);
+  /// @return True if the part should be ignored, otherwise false.
+  bool isIgnored(RegionNode *RN);
 
   /// @brief Add parameter constraints to @p C that imply a non-empty domain.
   __isl_give isl_set *addNonEmptyDomainConstraints(__isl_take isl_set *C) const;
+
+  /// @brief Simplify the SCoP representation
+  ///
+  /// At the moment we perform the following simplifications:
+  ///   - removal of no-op statements
+  /// @param RemoveIgnoredStmts If true, also removed ignored statments.
+  /// @see isIgnored()
+  void simplifySCoP(bool RemoveIgnoredStmts);
+
+  /// @brief Create equivalence classes for required invariant accesses.
+  ///
+  /// These classes will consolidate multiple required invariant loads from the
+  /// same address in order to keep the number of dimensions in the SCoP
+  /// description small. For each such class equivalence class only one
+  /// representing element, hence one required invariant load, will be chosen
+  /// and modeled as parameter. The method
+  /// Scop::getRepresentingInvariantLoadSCEV() will replace each element from an
+  /// equivalence class with the representing element that is modeled. As a
+  /// consequence Scop::getIdForParam() will only return an id for the
+  /// representing element of each equivalence class, thus for each required
+  /// invariant location.
+  void buildInvariantEquivalenceClasses();
+
+  /// @brief Hoist invariant memory loads and check for required ones.
+  ///
+  /// We first identify "common" invariant loads, thus loads that are invariant
+  /// and can be hoisted. Then we check if all required invariant loads have
+  /// been identified as (common) invariant. A load is a required invariant load
+  /// if it was assumed to be invariant during SCoP detection, e.g., to assume
+  /// loop bounds to be affine or runtime alias checks to be placeable. In case
+  /// a required invariant load was not identified as (common) invariant we will
+  /// drop this SCoP. An example for both "common" as well as required invariant
+  /// loads is given below:
+  ///
+  /// for (int i = 1; i < *LB[0]; i++)
+  ///   for (int j = 1; j < *LB[1]; j++)
+  ///     A[i][j] += A[0][0] + (*V);
+  ///
+  /// Common inv. loads: V, A[0][0], LB[0], LB[1]
+  /// Required inv. loads: LB[0], LB[1], (V, if it may alias with A or LB)
+  void hoistInvariantLoads();
+
+  /// @brief Add invariant loads listed in @p InvMAs with the domain of @p Stmt.
+  void addInvariantLoads(ScopStmt &Stmt, MemoryAccessList &InvMAs);
 
   /// @brief Build the Context of the Scop.
   void buildContext();
@@ -1067,6 +1252,19 @@ private:
   /// @brief Simplify the assumed and boundary context.
   void simplifyContexts();
 
+  /// @brief Get the representing SCEV for @p S if applicable, otherwise @p S.
+  ///
+  /// Invariant loads of the same location are put in an equivalence class and
+  /// only one of them is chosen as a representing element that will be
+  /// modeled as a parameter. The others have to be normalized, i.e.,
+  /// replaced by the representing element of their equivalence class, in order
+  /// to get the correct parameter value, e.g., in the SCEVAffinator.
+  ///
+  /// @param S The SCEV to normalize.
+  ///
+  /// @return The representing SCEV for invariant loads or @p S if none.
+  const SCEV *getRepresentingInvariantLoadSCEV(const SCEV *S);
+
   /// @brief Create a new SCoP statement for either @p BB or @p R.
   ///
   /// Either @p BB or @p R should be non-null. A new statement for the non-null
@@ -1076,13 +1274,21 @@ private:
   /// @param R          The region we build the statement for (or null).
   ScopStmt *addScopStmt(BasicBlock *BB, Region *R);
 
+  /// @param Update access dimensionalities.
+  ///
+  /// When detecting memory accesses different accesses to the same array may
+  /// have built with different dimensionality, as outer zero-values dimensions
+  /// may not have been recognized as separate dimensions. This function goes
+  /// again over all memory accesses and updates their dimensionality to match
+  /// the dimensionality of the underlying ScopArrayInfo object.
+  void updateAccessDimensionality();
+
   /// @brief Build Schedule and ScopStmts.
   ///
-  /// @param R  The current region traversed.
-  /// @param LI The LoopInfo object.
-  /// @param SD The ScopDetection object.
+  /// @param R              The current region traversed.
+  /// @param LoopSchedules  Map from loops to their schedule and progress.
   void buildSchedule(
-      Region *R, LoopInfo &LI, ScopDetection &SD,
+      Region *R,
       DenseMap<Loop *, std::pair<isl_schedule *, unsigned>> &LoopSchedules);
 
   /// @name Helper function for printing the Scop.
@@ -1112,6 +1318,7 @@ public:
   //@}
 
   ScalarEvolution *getSE() const;
+  ScopDetection &getSD() const { return SD; }
 
   /// @brief Get the count of parameters used in this Scop.
   ///
@@ -1130,6 +1337,10 @@ public:
 
   int getNumArrays() { return ScopArrayInfoMap.size(); }
 
+  /// @brief Return whether this scop is empty, i.e. contains no statements that
+  /// could be executed.
+  bool isEmpty() const { return Stmts.empty(); }
+
   typedef iterator_range<ArrayInfoMapTy::iterator> array_range;
   typedef iterator_range<ArrayInfoMapTy::const_iterator> const_array_range;
 
@@ -1146,7 +1357,7 @@ public:
   /// @param Parameter A SCEV that was recognized as a Parameter.
   ///
   /// @return The corresponding isl_id or NULL otherwise.
-  isl_id *getIdForParam(const SCEV *Parameter) const;
+  isl_id *getIdForParam(const SCEV *Parameter);
 
   /// @name Parameter Iterators
   ///
@@ -1171,6 +1382,14 @@ public:
   ///
   /// @return The maximum depth of the loop.
   inline unsigned getMaxLoopDepth() const { return MaxLoopDepth; }
+
+  /// @brief Return the invariant equivalence class for @p Val if any.
+  const InvariantEquivClassTy *lookupInvariantEquivClass(Value *Val) const;
+
+  /// @brief Return the set of invariant accesses.
+  const InvariantEquivClassesTy &getInvariantAccesses() const {
+    return InvariantEquivClasses;
+  }
 
   /// @brief Mark the SCoP as optimized by the scheduler.
   void markAsOptimized() { IsOptimized = true; }
@@ -1411,19 +1630,22 @@ class ScopInfo : public RegionPass {
   // must live until #scop is deleted.
   AccFuncMapType AccFuncMap;
 
-  // Pre-created zero for the scalar accesses, with it we do not need create a
-  // zero scev every time when we need it.
-  const SCEV *ZeroOffset;
-
   // The Scop
   Scop *scop;
   isl_ctx *ctx;
+
+  /// @brief Return the SCoP region that is currently processed.
+  Region *getRegion() const {
+    if (!scop)
+      return nullptr;
+    return &scop->getRegion();
+  }
 
   // Clear the context.
   void clear();
 
   // Build the SCoP for Region @p R.
-  Scop *buildScop(Region &R, DominatorTree &DT);
+  void buildScop(Region &R, DominatorTree &DT);
 
   /// @brief Build an instance of MemoryAccess from the Load/Store instruction.
   ///
@@ -1431,8 +1653,10 @@ class ScopInfo : public RegionPass {
   /// @param L          The parent loop of the instruction
   /// @param R          The region on which to build the data access dictionary.
   /// @param BoxedLoops The set of loops that are overapproximated in @p R.
+  /// @param ScopRIL    The required invariant loads equivalence classes.
   void buildMemoryAccess(Instruction *Inst, Loop *L, Region *R,
-                         const ScopDetection::BoxedLoopsSetTy *BoxedLoops);
+                         const ScopDetection::BoxedLoopsSetTy *BoxedLoops,
+                         const InvariantLoadsSetTy &ScopRIL);
 
   /// @brief Analyze and extract the cross-BB scalar dependences (or,
   ///        dataflow dependencies) of an instruction.
@@ -1461,6 +1685,12 @@ class ScopInfo : public RegionPass {
   /// @param SR A subregion of @p R.
   void buildAccessFunctions(Region &R, Region &SR);
 
+  /// @brief Create ScopStmt for all BBs and non-affine subregions of @p SR.
+  ///
+  /// Some of the statments might be optimized away later when they do not
+  /// access any memory and thus have no effect.
+  void buildStmts(Region &SR);
+
   /// @brief Build the access functions for the basic block @p BB
   ///
   /// @param R                  The SCoP region.
@@ -1483,29 +1713,91 @@ class ScopInfo : public RegionPass {
   /// @param AccessValue Value read or written.
   /// @param Subscripts  Access subscripts per dimension.
   /// @param Sizes       The array diminsion's sizes.
-  /// @param IsPHI       Whether this is an emulated PHI node.
+  /// @param Origin      Purpose of this access.
   void addMemoryAccess(BasicBlock *BB, Instruction *Inst,
                        MemoryAccess::AccessType Type, Value *BaseAddress,
                        unsigned ElemBytes, bool Affine, Value *AccessValue,
                        ArrayRef<const SCEV *> Subscripts,
-                       ArrayRef<const SCEV *> Sizes, bool IsPHI);
+                       ArrayRef<const SCEV *> Sizes,
+                       MemoryAccess::AccessOrigin Origin);
 
-  void addMemoryAccess(BasicBlock *BB, Instruction *Inst,
-                       MemoryAccess::AccessType Type, Value *BaseAddress,
-                       unsigned ElemBytes, bool Affine, Value *AccessValue,
-                       bool IsPHI = false) {
-    addMemoryAccess(BB, Inst, Type, BaseAddress, ElemBytes, Affine, AccessValue,
-                    ArrayRef<const SCEV *>(), ArrayRef<const SCEV *>(), IsPHI);
-  }
+  /// @brief Create a MemoryAccess that represents either a LoadInst or
+  /// StoreInst.
+  ///
+  /// @param MemAccInst  The LoadInst or StoreInst.
+  /// @param Type        The kind of access.
+  /// @param BaseAddress The accessed array's base address.
+  /// @param ElemBytes   Size of accessed array element.
+  /// @param IsAffine    Whether all subscripts are affine expressions.
+  /// @param Subscripts  Access subscripts per dimension.
+  /// @param Sizes       The array dimension's sizes.
+  /// @param AccessValue Value read or written.
+  /// @see AccessOrigin
+  void addExplicitAccess(Instruction *MemAccInst, MemoryAccess::AccessType Type,
+                         Value *BaseAddress, unsigned ElemBytes, bool IsAffine,
+                         ArrayRef<const SCEV *> Subscripts,
+                         ArrayRef<const SCEV *> Sizes, Value *AccessValue);
 
-  void addMemoryAccess(BasicBlock *BB, Instruction *Inst,
-                       MemoryAccess::AccessType Type, Value *BaseAddress,
-                       unsigned ElemBytes, bool Affine,
-                       ArrayRef<const SCEV *> Subscripts,
-                       ArrayRef<const SCEV *> Sizes, Value *AccessValue) {
-    addMemoryAccess(BB, Inst, Type, BaseAddress, ElemBytes, Affine, AccessValue,
-                    Subscripts, Sizes, false);
-  }
+  /// @brief Create a MemoryAccess for writing an llvm::Value.
+  ///
+  /// The access will be created at the @p Value's definition.
+  ///
+  /// @param Value The value to be written.
+  /// @see addScalarReadAccess()
+  /// @see AccessOrigin
+  void addScalarWriteAccess(Instruction *Value);
+
+  /// @brief Create a MemoryAccess for reloading an llvm::Value.
+  ///
+  /// Use this overload only for non-PHI instructions.
+  ///
+  /// @param Value The scalar expected to be loaded.
+  /// @param User  User of the scalar; this is where the access is added.
+  /// @see addScalarWriteAccess()
+  /// @see AccessOrigin
+  void addScalarReadAccess(Value *Value, Instruction *User);
+
+  /// @brief Create a MemoryAccess for reloading an llvm::Value.
+  ///
+  /// This is for PHINodes using the scalar. As we model it, the used value must
+  /// be available at the incoming block instead of when hitting the
+  /// instruction.
+  ///
+  /// @param Value  The scalar expected to be loaded.
+  /// @param User   The PHI node referencing @p Value.
+  /// @param UserBB Incoming block for the incoming @p Value.
+  /// @see addPHIWriteAccess()
+  /// @see addScalarWriteAccess()
+  /// @see AccessOrigin
+  void addScalarReadAccess(Value *Value, PHINode *User, BasicBlock *UserBB);
+
+  /// @brief Create a write MemoryAccess for the incoming block of a phi node.
+  ///
+  /// Each of the incoming blocks write their incoming value to be picked in the
+  /// phi's block.
+  ///
+  /// @param PHI           PHINode under consideration.
+  /// @param IncomingBlock Some predecessor block.
+  /// @param IncomingValue @p PHI's value when coming from @p IncomingBlock.
+  /// @param IsExitBlock   When true, uses the .s2a alloca instead of the
+  ///                      .phiops one. Required for values escaping through a
+  ///                      PHINode in the SCoP region's exit block.
+  /// @see addPHIReadAccess()
+  /// @see AccessOrigin
+  void addPHIWriteAccess(PHINode *PHI, BasicBlock *IncomingBlock,
+                         Value *IncomingValue, bool IsExitBlock);
+
+  /// @brief Create a MemoryAccess for reading the value of a phi.
+  ///
+  /// The modeling assumes that all incoming blocks write their incoming value
+  /// to the same location. Thus, this access will read the incoming block's
+  /// value as instructed by this @p PHI.
+  ///
+  /// @param PHI PHINode under consideration; the READ access will be added
+  /// here.
+  /// @see addPHIWriteAccess()
+  /// @see AccessOrigin
+  void addPHIReadAccess(PHINode *PHI);
 
 public:
   static char ID;

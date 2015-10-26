@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -analyze -polly-scops -polly-detect-unprofitable \
+; RUN: opt %loadPolly -analyze -polly-scops \
 ; RUN: < %s | FileCheck %s
 ;
 ;    float foo(float sum, float A[]) {
@@ -27,8 +27,6 @@
 ; CHECK:           { Stmt_bb1[i0] -> MemRef_phisum__phi[] };
 ; CHECK:       ReadAccess :=       [Reduction Type: NONE] [Scalar: 1]
 ; CHECK:           { Stmt_bb1[i0] -> MemRef_phisum__phi[] };
-; CHECK:       MustWriteAccess :=  [Reduction Type: NONE] [Scalar: 1]
-; CHECK:           { Stmt_bb1[i0] -> MemRef_phisum[] };
 ; CHECK:       ReadAccess :=       [Reduction Type: NONE] [Scalar: 0]
 ; CHECK:           { Stmt_bb1[i0] -> MemRef_A[i0] };
 

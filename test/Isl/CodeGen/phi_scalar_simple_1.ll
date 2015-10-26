@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -S -polly-detect-unprofitable -polly-no-early-exit -polly-codegen < %s | FileCheck %s
+; RUN: opt %loadPolly -S -polly-codegen < %s | FileCheck %s
 ;
 ;    int jd(int *restrict A, int x, int N) {
 ;      for (int i = 1; i < N; i++)
@@ -26,7 +26,7 @@ entry:
 ; CHECK:         ret i32 %x.addr.0.merge
 
 ; CHECK-LABEL: polly.start:
-; CHECK-NEXT:    store i32 %x, i32* %x.addr.0.phiops
+; CHECK:         store i32 %x, i32* %x.addr.0.phiops
 
 ; CHECK-LABEL: polly.merge:
 ; CHECK:         %x.addr.0.final_reload = load i32, i32* %x.addr.0.s2a

@@ -60,9 +60,6 @@ public:
   RegionInfo *RI;
   ///}
 
-  /// @brief The loop annotator to generate llvm.loop metadata.
-  ScopAnnotator Annotator;
-
   /// @brief Build the runtime condition.
   ///
   /// Build the condition that evaluates at run-time to true iff all
@@ -108,6 +105,7 @@ public:
     }
   }
 
+  /// @brief Generate LLVM-IR for the SCoP @p S.
   bool runOnScop(Scop &S) override {
     AI = &getAnalysis<IslAstInfo>();
 
@@ -124,6 +122,7 @@ public:
     Region *R = &S.getRegion();
     assert(!R->isTopLevelRegion() && "Top level regions are not supported");
 
+    ScopAnnotator Annotator;
     Annotator.buildAliasScopes(S);
 
     simplifyRegion(R, DT, LI, RI);
@@ -143,10 +142,17 @@ public:
     BasicBlock *StartBlock =
         executeScopConditionally(S, this, Builder.getTrue());
     auto SplitBlock = StartBlock->getSinglePredecessor();
+
+    // First generate code for the hoisted invariant loads and transitively the
+    // parameters they reference. Afterwards, for the remaining parameters that
+    // might reference the hoisted loads. Finally, build the runtime check
+    // that might reference both hoisted loads as well as parameters.
     Builder.SetInsertPoint(SplitBlock->getTerminator());
+    NodeBuilder.preloadInvariantLoads();
     NodeBuilder.addParameters(S.getContext());
+
     Value *RTC = buildRTC(Builder, NodeBuilder.getExprBuilder());
-    SplitBlock->getTerminator()->setOperand(0, RTC);
+    Builder.GetInsertBlock()->getTerminator()->setOperand(0, RTC);
     Builder.SetInsertPoint(StartBlock->begin());
 
     NodeBuilder.create(AstRoot);
@@ -159,8 +165,7 @@ public:
     return true;
   }
 
-  void printScop(raw_ostream &, Scop &) const override {}
-
+  /// @brief Register all analyses and transformation required.
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<IslAstInfo>();
@@ -187,7 +192,6 @@ public:
     //        region tree.
     AU.addPreserved<RegionInfoPass>();
     AU.addPreserved<ScopInfo>();
-    AU.addPreservedID(IndependentBlocksID);
   }
 };
 }

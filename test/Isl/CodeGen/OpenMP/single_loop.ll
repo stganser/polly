@@ -1,8 +1,8 @@
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-parallel -polly-parallel-force -polly-ast -analyze < %s | FileCheck %s -check-prefix=AST
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-parallel -polly-parallel-force -polly-codegen -S -verify-dom-info < %s | FileCheck %s -check-prefix=IR
+; RUN: opt %loadPolly -polly-parallel -polly-parallel-force -polly-ast -analyze < %s | FileCheck %s -check-prefix=AST
+; RUN: opt %loadPolly -polly-parallel -polly-parallel-force -polly-codegen -S -verify-dom-info < %s | FileCheck %s -check-prefix=IR
 
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-parallel -polly-parallel-force -polly-import-jscop -polly-import-jscop-dir=%S -polly-ast -analyze < %s | FileCheck %s -check-prefix=AST-STRIDE4
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-parallel -polly-parallel-force -polly-import-jscop -polly-import-jscop-dir=%S -polly-codegen -S < %s | FileCheck %s -check-prefix=IR-STRIDE4
+; RUN: opt %loadPolly -polly-parallel -polly-parallel-force -polly-import-jscop -polly-import-jscop-dir=%S -polly-ast -analyze < %s | FileCheck %s -check-prefix=AST-STRIDE4
+; RUN: opt %loadPolly -polly-parallel -polly-parallel-force -polly-import-jscop -polly-import-jscop-dir=%S -polly-codegen -S < %s | FileCheck %s -check-prefix=IR-STRIDE4
 
 ; This extensive test case tests the creation of the full set of OpenMP calls
 ; as well as the subfunction creation using a trivial loop as example.
@@ -30,7 +30,7 @@
 ; IR-NEXT: entry
 ; IR-NEXT:   %polly.par.userContext = alloca
 
-; IR-LABEL: polly.start:
+; IR-LABEL: polly.parallel.for:
 ; IR-NEXT:   %0 = bitcast {}* %polly.par.userContext to i8*
 ; IR-NEXT:   call void @llvm.lifetime.start(i64 0, i8* %0)
 ; IR-NEXT:   %polly.par.userContext1 = bitcast {}* %polly.par.userContext to i8*

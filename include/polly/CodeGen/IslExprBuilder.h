@@ -13,6 +13,8 @@
 #define POLLY_ISL_EXPR_BUILDER_H
 
 #include "polly/CodeGen/IRBuilder.h"
+#include "polly/Support/ScopHelper.h"
+
 #include "llvm/ADT/MapVector.h"
 #include "isl/ast.h"
 
@@ -80,8 +82,7 @@ namespace polly {
 class IslExprBuilder {
 public:
   /// @brief A map from isl_ids to llvm::Values.
-  typedef llvm::MapVector<isl_id *, llvm::Value *> IDToValueTy;
-  typedef llvm::DenseMap<const llvm::Value *, llvm::Value *> ValueToValueMap;
+  typedef llvm::MapVector<isl_id *, llvm::AssertingVH<llvm::Value>> IDToValueTy;
 
   /// @brief Construct an IslExprBuilder.
   ///
@@ -94,7 +95,7 @@ public:
   ///                  specifies the LLVM-IR Values that correspond to these
   ///                  parameters and variables.
   IslExprBuilder(Scop &S, PollyIRBuilder &Builder, IDToValueTy &IDToValue,
-                 ValueToValueMap &GlobalMap, const llvm::DataLayout &DL,
+                 ValueMapT &GlobalMap, const llvm::DataLayout &DL,
                  llvm::ScalarEvolution &SE, llvm::DominatorTree &DT,
                  llvm::LoopInfo &LI)
       : S(S), Builder(Builder), IDToValue(IDToValue), GlobalMap(GlobalMap),
@@ -129,7 +130,7 @@ private:
 
   PollyIRBuilder &Builder;
   IDToValueTy &IDToValue;
-  ValueToValueMap &GlobalMap;
+  ValueMapT &GlobalMap;
 
   const llvm::DataLayout &DL;
   llvm::ScalarEvolution &SE;

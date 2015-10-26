@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-scops -analyze < %s | FileCheck %s
 ;
 ; Verify the scalar x defined in a non-affine subregion is written as it
 ; escapes the region. In this test the two conditionals inside the region
@@ -35,11 +35,11 @@
 ; CHECK-NEXT:        { Stmt_bb3__TO__bb18[i0] -> MemRef_A[i0] };
 ; CHECK-NOT:         { Stmt_bb3__TO__bb18[i0] -> MemRef_x_0[] };
 ; CHECK-NOT:         { Stmt_bb3__TO__bb18[i0] -> MemRef_x_1[] };
-; CHECK:         MustWriteAccess :=  [Reduction Type: NONE] [Scalar: 1]
+; CHECK:         MayWriteAccess := [Reduction Type: NONE] [Scalar: 1]
 ; CHECK-NEXT:        { Stmt_bb3__TO__bb18[i0] -> MemRef_x_2__phi[] };
 ; CHECK-NOT:         { Stmt_bb3__TO__bb18[i0] -> MemRef_x_0[] };
 ; CHECK-NOT:         { Stmt_bb3__TO__bb18[i0] -> MemRef_x_1[] };
-; CHECK:         MayWriteAccess := [Reduction Type: NONE] [Scalar: 1]
+; CHECK:         MustWriteAccess :=  [Reduction Type: NONE] [Scalar: 1]
 ; CHECK-NEXT:        { Stmt_bb3__TO__bb18[i0] -> MemRef_x_2__phi[] };
 ; CHECK-NOT:         { Stmt_bb3__TO__bb18[i0] -> MemRef_x_0[] };
 ; CHECK-NOT:         { Stmt_bb3__TO__bb18[i0] -> MemRef_x_1[] };

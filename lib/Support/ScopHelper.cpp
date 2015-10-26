@@ -12,14 +12,16 @@
 //===----------------------------------------------------------------------===//
 
 #include "polly/Support/ScopHelper.h"
+#include "polly/Options.h"
 #include "polly/ScopInfo.h"
-#include "llvm/Analysis/AliasAnalysis.h"
+#include "polly/Support/SCEVValidator.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpander.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
@@ -235,8 +237,9 @@ struct ScopExpander : SCEVVisitor<ScopExpander, const SCEV *> {
   friend struct SCEVVisitor<ScopExpander, const SCEV *>;
 
   explicit ScopExpander(const Region &R, ScalarEvolution &SE,
-                        const DataLayout &DL, const char *Name)
-      : Expander(SCEVExpander(SE, DL, Name)), SE(SE), Name(Name), R(R) {}
+                        const DataLayout &DL, const char *Name, ValueMapT *VMap)
+      : Expander(SCEVExpander(SE, DL, Name)), SE(SE), Name(Name), R(R),
+        VMap(VMap) {}
 
   Value *expandCodeFor(const SCEV *E, Type *Ty, Instruction *I) {
     // If we generate code in the region we will immediately fall back to the
@@ -252,8 +255,16 @@ private:
   ScalarEvolution &SE;
   const char *Name;
   const Region &R;
+  ValueMapT *VMap;
 
   const SCEV *visitUnknown(const SCEVUnknown *E) {
+
+    // If a value mapping was given try if the underlying value is remapped.
+    if (VMap)
+      if (Value *NewVal = VMap->lookup(E->getValue()))
+        if (NewVal != E->getValue())
+          return visit(SE.getSCEV(NewVal));
+
     Instruction *Inst = dyn_cast<Instruction>(E->getValue());
     if (!Inst || (Inst->getOpcode() != Instruction::SRem &&
                   Inst->getOpcode() != Instruction::SDiv))
@@ -327,21 +338,108 @@ private:
 
 Value *polly::expandCodeFor(Scop &S, ScalarEvolution &SE, const DataLayout &DL,
                             const char *Name, const SCEV *E, Type *Ty,
-                            Instruction *IP) {
-  ScopExpander Expander(S.getRegion(), SE, DL, Name);
+                            Instruction *IP, ValueMapT *VMap) {
+  ScopExpander Expander(S.getRegion(), SE, DL, Name, VMap);
   return Expander.expandCodeFor(E, Ty, IP);
 }
 
-bool polly::isErrorBlock(BasicBlock &BB) {
-
-  for (Instruction &Inst : BB)
-    if (CallInst *CI = dyn_cast<CallInst>(&Inst))
-      if (Function *F = CI->getCalledFunction())
-        if (F->getName().equals("__ubsan_handle_out_of_bounds"))
-          return true;
+bool polly::isErrorBlock(BasicBlock &BB, const Region &R, LoopInfo &LI,
+                         const DominatorTree &DT) {
 
   if (isa<UnreachableInst>(BB.getTerminator()))
     return true;
+
+  if (LI.isLoopHeader(&BB))
+    return false;
+
+  if (DT.dominates(&BB, R.getExit()))
+    return false;
+
+  // FIXME: This is a simple heuristic to determine if the load is executed
+  //        in a conditional. However, we actually would need the control
+  //        condition, i.e., the post dominance frontier. Alternatively we
+  //        could walk up the dominance tree until we find a block that is
+  //        not post dominated by the load and check if it is a conditional
+  //        or a loop header.
+  auto *DTNode = DT.getNode(&BB);
+  auto *IDomBB = DTNode->getIDom()->getBlock();
+  if (LI.isLoopHeader(IDomBB))
+    return false;
+
+  for (Instruction &Inst : BB)
+    if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
+      if (!CI->doesNotAccessMemory())
+        return true;
+      if (CI->doesNotReturn())
+        return true;
+    }
+
+  return false;
+}
+
+Value *polly::getConditionFromTerminator(TerminatorInst *TI) {
+  if (BranchInst *BR = dyn_cast<BranchInst>(TI)) {
+    if (BR->isUnconditional())
+      return ConstantInt::getTrue(Type::getInt1Ty(TI->getContext()));
+
+    return BR->getCondition();
+  }
+
+  if (SwitchInst *SI = dyn_cast<SwitchInst>(TI))
+    return SI->getCondition();
+
+  return nullptr;
+}
+
+bool polly::isHoistableLoad(LoadInst *LInst, Region &R, LoopInfo &LI,
+                            ScalarEvolution &SE) {
+  Loop *L = LI.getLoopFor(LInst->getParent());
+  const SCEV *PtrSCEV = SE.getSCEVAtScope(LInst->getPointerOperand(), L);
+  while (L && R.contains(L)) {
+    if (!SE.isLoopInvariant(PtrSCEV, L))
+      return false;
+    L = L->getParentLoop();
+  }
+
+  return true;
+}
+
+bool polly::isIgnoredIntrinsic(const Value *V) {
+  if (auto *IT = dyn_cast<IntrinsicInst>(V)) {
+    switch (IT->getIntrinsicID()) {
+    // Lifetime markers are supported/ignored.
+    case llvm::Intrinsic::lifetime_start:
+    case llvm::Intrinsic::lifetime_end:
+    // Invariant markers are supported/ignored.
+    case llvm::Intrinsic::invariant_start:
+    case llvm::Intrinsic::invariant_end:
+    // Some misc annotations are supported/ignored.
+    case llvm::Intrinsic::var_annotation:
+    case llvm::Intrinsic::ptr_annotation:
+    case llvm::Intrinsic::annotation:
+    case llvm::Intrinsic::donothing:
+    case llvm::Intrinsic::assume:
+    case llvm::Intrinsic::expect:
+    // Some debug info intrisics are supported/ignored.
+    case llvm::Intrinsic::dbg_value:
+    case llvm::Intrinsic::dbg_declare:
+      return true;
+    default:
+      break;
+    }
+  }
+  return false;
+}
+
+bool polly::canSynthesize(const Value *V, const llvm::LoopInfo *LI,
+                          ScalarEvolution *SE, const Region *R) {
+  if (!V || !SE->isSCEVable(V->getType()))
+    return false;
+
+  if (const SCEV *Scev = SE->getSCEV(const_cast<Value *>(V)))
+    if (!isa<SCEVCouldNotCompute>(Scev))
+      if (!hasScalarDepsInsideRegion(Scev, R))
+        return true;
 
   return false;
 }

@@ -71,10 +71,10 @@ static cl::opt<bool> DetectParallel("polly-ast-detect-parallel",
                                     cl::init(false), cl::ZeroOrMore,
                                     cl::cat(PollyCategory));
 
-static cl::opt<bool> NoEarlyExit(
-    "polly-no-early-exit",
-    cl::desc("Do not exit early if no benefit of the Polly version was found."),
-    cl::Hidden, cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
+static cl::opt<bool> EarlyExit("polly-no-early-exit",
+                               cl::desc("Dummy flag to keep LNT builders run"),
+                               cl::Hidden, cl::ZeroOrMore,
+                               cl::cat(PollyCategory));
 
 namespace polly {
 class IslAst {
@@ -370,8 +370,7 @@ void IslAst::buildRunCondition(__isl_keep isl_ast_build *Build) {
 ///       original as well as optimized SCoP (e.g., #stride-one-accesses).
 static bool benefitsFromPolly(Scop *Scop, bool PerformParallelTest) {
 
-  // First check the user choice.
-  if (NoEarlyExit)
+  if (PollyProcessUnprofitable)
     return true;
 
   // Check if nothing interesting happened.
@@ -551,6 +550,11 @@ void IslAstInfo::printScop(raw_ostream &OS, Scop &S) const {
 
   if (!RootNode) {
     OS << ":: isl ast generation and code generation was skipped!\n\n";
+    OS << ":: This is either because no useful optimizations could be applied "
+          "(use -polly-process-unprofitable to enforce code generation) or "
+          "because earlier passes such as dependence analysis timed out (use "
+          "-polly-dependences-computeout=0 to set dependence analysis timeout "
+          "to infinity)\n\n";
     return;
   }
 
