@@ -103,7 +103,8 @@ public:
   ///
   ///  @param A vector of array sizes where the rightmost array sizes need to
   ///         match the innermost array sizes already defined in SAI.
-  void updateSizes(ArrayRef<const SCEV *> Sizes);
+  ///  @returns Returns true if the update was successful, otherwise false.
+  bool updateSizes(ArrayRef<const SCEV *> Sizes);
 
   /// @brief Destructor to free the isl id of the base pointer.
   ~ScopArrayInfo();
@@ -513,8 +514,6 @@ public:
   ///
   /// @param Stmt       The parent statement.
   /// @param AccessInst The instruction doing the access.
-  /// @param Id         Identifier that is guranteed to be unique within the
-  ///                   same ScopStmt.
   /// @param BaseAddr   The accessed array's address.
   /// @param ElemBytes  Number of accessed bytes.
   /// @param AccType    Whether read or write access.
@@ -523,11 +522,10 @@ public:
   /// @param Subscripts Subscipt expressions
   /// @param Sizes      Dimension lengths of the accessed array.
   /// @param BaseName   Name of the acessed array.
-  MemoryAccess(ScopStmt *Stmt, Instruction *AccessInst, __isl_take isl_id *Id,
-               AccessType Type, Value *BaseAddress, unsigned ElemBytes,
-               bool Affine, ArrayRef<const SCEV *> Subscripts,
-               ArrayRef<const SCEV *> Sizes, Value *AccessValue,
-               AccessOrigin Origin, StringRef BaseName);
+  MemoryAccess(ScopStmt *Stmt, Instruction *AccessInst, AccessType Type,
+               Value *BaseAddress, unsigned ElemBytes, bool Affine,
+               ArrayRef<const SCEV *> Subscripts, ArrayRef<const SCEV *> Sizes,
+               Value *AccessValue, AccessOrigin Origin, StringRef BaseName);
   ~MemoryAccess();
 
   /// @brief Get the type of a memory access.

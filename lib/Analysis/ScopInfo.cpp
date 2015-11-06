@@ -173,16 +173,16 @@ __isl_give isl_space *ScopArrayInfo::getSpace() const {
   return Space;
 }
 
-void ScopArrayInfo::updateSizes(ArrayRef<const SCEV *> NewSizes) {
-#ifndef NDEBUG
+bool ScopArrayInfo::updateSizes(ArrayRef<const SCEV *> NewSizes) {
   int SharedDims = std::min(NewSizes.size(), DimensionSizes.size());
   int ExtraDimsNew = NewSizes.size() - SharedDims;
   int ExtraDimsOld = DimensionSizes.size() - SharedDims;
-  for (int i = 0; i < SharedDims; i++) {
-    assert(NewSizes[i + ExtraDimsNew] == DimensionSizes[i + ExtraDimsOld] &&
-           "Array update with non-matching dimension sizes");
-  }
-#endif
+  for (int i = 0; i < SharedDims; i++)
+    if (NewSizes[i + ExtraDimsNew] != DimensionSizes[i + ExtraDimsOld])
+      return false;
+
+  if (DimensionSizes.size() >= NewSizes.size())
+    return true;
 
   DimensionSizes.clear();
   DimensionSizes.insert(DimensionSizes.begin(), NewSizes.begin(),
@@ -194,6 +194,7 @@ void ScopArrayInfo::updateSizes(ArrayRef<const SCEV *> NewSizes) {
     isl_pw_aff *Size = S.getPwAff(Expr);
     DimensionSizesPw.push_back(Size);
   }
+  return true;
 }
 
 ScopArrayInfo::~ScopArrayInfo() {
@@ -640,17 +641,21 @@ void MemoryAccess::buildAccessRelation(const ScopArrayInfo *SAI) {
 }
 
 MemoryAccess::MemoryAccess(ScopStmt *Stmt, Instruction *AccessInst,
-                           __isl_take isl_id *Id, AccessType Type,
-                           Value *BaseAddress, unsigned ElemBytes, bool Affine,
+                           AccessType Type, Value *BaseAddress,
+                           unsigned ElemBytes, bool Affine,
                            ArrayRef<const SCEV *> Subscripts,
                            ArrayRef<const SCEV *> Sizes, Value *AccessValue,
                            AccessOrigin Origin, StringRef BaseName)
-    : Id(Id), Origin(Origin), AccType(Type), RedType(RT_NONE), Statement(Stmt),
+    : Origin(Origin), AccType(Type), RedType(RT_NONE), Statement(Stmt),
       BaseAddr(BaseAddress), BaseName(BaseName), ElemBytes(ElemBytes),
       Sizes(Sizes.begin(), Sizes.end()), AccessInstruction(AccessInst),
       AccessValue(AccessValue), IsAffine(Affine),
       Subscripts(Subscripts.begin(), Subscripts.end()), AccessRelation(nullptr),
-      NewAccessRelation(nullptr) {}
+      NewAccessRelation(nullptr) {
+
+  std::string IdName = "__polly_array_ref";
+  Id = isl_id_alloc(Stmt->getParent()->getIslCtx(), IdName.c_str(), this);
+}
 
 void MemoryAccess::realignParams() {
   isl_space *ParamSpace = Statement->getParent()->getParamSpace();
@@ -1420,8 +1425,89 @@ void Scop::setContext(__isl_take isl_set *NewContext) {
   Context = NewContext;
 }
 
+/// @brief Remap parameter values but keep AddRecs valid wrt. invariant loads.
+struct SCEVSensitiveParameterRewriter
+    : public SCEVVisitor<SCEVSensitiveParameterRewriter, const SCEV *> {
+  ValueToValueMap &VMap;
+  ScalarEvolution &SE;
+
+public:
+  SCEVSensitiveParameterRewriter(ValueToValueMap &VMap, ScalarEvolution &SE)
+      : VMap(VMap), SE(SE) {}
+
+  static const SCEV *rewrite(const SCEV *E, ScalarEvolution &SE,
+                             ValueToValueMap &VMap) {
+    SCEVSensitiveParameterRewriter SSPR(VMap, SE);
+    return SSPR.visit(E);
+  }
+
+  const SCEV *visit(const SCEV *E) {
+    return SCEVVisitor<SCEVSensitiveParameterRewriter, const SCEV *>::visit(E);
+  }
+
+  const SCEV *visitConstant(const SCEVConstant *E) { return E; }
+
+  const SCEV *visitTruncateExpr(const SCEVTruncateExpr *E) {
+    return SE.getTruncateExpr(visit(E->getOperand()), E->getType());
+  }
+
+  const SCEV *visitZeroExtendExpr(const SCEVZeroExtendExpr *E) {
+    return SE.getZeroExtendExpr(visit(E->getOperand()), E->getType());
+  }
+
+  const SCEV *visitSignExtendExpr(const SCEVSignExtendExpr *E) {
+    return SE.getSignExtendExpr(visit(E->getOperand()), E->getType());
+  }
+
+  const SCEV *visitAddExpr(const SCEVAddExpr *E) {
+    SmallVector<const SCEV *, 4> Operands;
+    for (int i = 0, e = E->getNumOperands(); i < e; ++i)
+      Operands.push_back(visit(E->getOperand(i)));
+    return SE.getAddExpr(Operands);
+  }
+
+  const SCEV *visitMulExpr(const SCEVMulExpr *E) {
+    SmallVector<const SCEV *, 4> Operands;
+    for (int i = 0, e = E->getNumOperands(); i < e; ++i)
+      Operands.push_back(visit(E->getOperand(i)));
+    return SE.getMulExpr(Operands);
+  }
+
+  const SCEV *visitSMaxExpr(const SCEVSMaxExpr *E) {
+    SmallVector<const SCEV *, 4> Operands;
+    for (int i = 0, e = E->getNumOperands(); i < e; ++i)
+      Operands.push_back(visit(E->getOperand(i)));
+    return SE.getSMaxExpr(Operands);
+  }
+
+  const SCEV *visitUMaxExpr(const SCEVUMaxExpr *E) {
+    SmallVector<const SCEV *, 4> Operands;
+    for (int i = 0, e = E->getNumOperands(); i < e; ++i)
+      Operands.push_back(visit(E->getOperand(i)));
+    return SE.getUMaxExpr(Operands);
+  }
+
+  const SCEV *visitUDivExpr(const SCEVUDivExpr *E) {
+    return SE.getUDivExpr(visit(E->getLHS()), visit(E->getRHS()));
+  }
+
+  const SCEV *visitAddRecExpr(const SCEVAddRecExpr *E) {
+    auto *Start = visit(E->getStart());
+    auto *AddRec = SE.getAddRecExpr(SE.getConstant(E->getType(), 0),
+                                    visit(E->getStepRecurrence(SE)),
+                                    E->getLoop(), SCEV::FlagAnyWrap);
+    return SE.getAddExpr(Start, AddRec);
+  }
+
+  const SCEV *visitUnknown(const SCEVUnknown *E) {
+    if (auto *NewValue = VMap.lookup(E->getValue()))
+      return SE.getUnknown(NewValue);
+    return E;
+  }
+};
+
 const SCEV *Scop::getRepresentingInvariantLoadSCEV(const SCEV *S) {
-  return SCEVParameterRewriter::rewrite(S, *SE, InvEquivClassVMap);
+  return SCEVSensitiveParameterRewriter::rewrite(S, *SE, InvEquivClassVMap);
 }
 
 void Scop::addParams(std::vector<const SCEV *> NewParameters) {
@@ -1455,6 +1541,10 @@ __isl_give isl_id *Scop::getIdForParam(const SCEV *Parameter) {
   if (const SCEVUnknown *ValueParameter = dyn_cast<SCEVUnknown>(Parameter)) {
     Value *Val = ValueParameter->getValue();
     ParameterName = Val->getName();
+    if (!Val->hasName())
+      if (LoadInst *LI = dyn_cast<LoadInst>(Val))
+        ParameterName =
+            LI->getPointerOperand()->stripInBoundsOffsets()->getName();
   }
 
   if (ParameterName == "" || ParameterName.substr(0, 2) == "p_")
@@ -2377,9 +2467,12 @@ void Scop::init(AliasAnalysis &AA) {
   Loop *L = getLoopSurroundingRegion(R, LI);
   LoopSchedules[L];
   buildSchedule(&R, LoopSchedules);
-  updateAccessDimensionality();
   Schedule = LoopSchedules[L].first;
 
+  if (isl_set_is_empty(AssumedContext))
+    return;
+
+  updateAccessDimensionality();
   realignParams();
   addParameterBounds();
   addUserContext();
@@ -2429,10 +2522,27 @@ void Scop::simplifySCoP(bool RemoveIgnoredStmts) {
                          ? Stmt.getRegion()->getNode()
                          : getRegion().getBBNode(Stmt.getBasicBlock());
 
-    if (StmtIt->isEmpty() ||
-        isl_set_is_empty(DomainMap[getRegionNodeBasicBlock(RN)]) ||
-        (RemoveIgnoredStmts && isIgnored(RN))) {
+    bool RemoveStmt = StmtIt->isEmpty();
+    if (!RemoveStmt)
+      RemoveStmt = isl_set_is_empty(DomainMap[getRegionNodeBasicBlock(RN)]);
+    if (!RemoveStmt)
+      RemoveStmt = (RemoveIgnoredStmts && isIgnored(RN));
 
+    // Remove read only statements only after invariant loop hoisting.
+    if (!RemoveStmt && !RemoveIgnoredStmts) {
+      bool OnlyRead = true;
+      for (MemoryAccess *MA : Stmt) {
+        if (MA->isRead())
+          continue;
+
+        OnlyRead = false;
+        break;
+      }
+
+      RemoveStmt = OnlyRead;
+    }
+
+    if (RemoveStmt) {
       // Remove the statement because it is unnecessary.
       if (Stmt.isRegionStmt())
         for (BasicBlock *BB : Stmt.getRegion()->blocks())
@@ -2640,8 +2750,10 @@ Scop::getOrCreateScopArrayInfo(Value *BasePtr, Type *AccessType,
     SAI.reset(new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Sizes, IsPHI,
                                 this));
   } else {
-    if (Sizes.size() > SAI->getNumberOfDimensions())
-      SAI->updateSizes(Sizes);
+    // In case of mismatching array sizes, we bail out by setting the run-time
+    // context to false.
+    if (!SAI->updateSizes(Sizes))
+      addAssumption(isl_set_empty(getParamSpace()));
   }
   return SAI.get();
 }
@@ -3119,7 +3231,16 @@ void Scop::buildSchedule(
             isl_schedule_insert_partial_schedule(LSchedulePair.first, MUPA);
 
       auto *PL = L->getParentLoop();
-      assert(LoopSchedules.count(PL));
+
+      // Either we have a proper loop and we also build a schedule for the
+      // parent loop or we have a infinite loop that does not have a proper
+      // parent loop. In the former case this conditional will be skipped, in
+      // the latter case however we will break here as we do not build a domain
+      // nor a schedule for a infinite loop.
+      assert(LoopSchedules.count(PL) || LSchedulePair.first == nullptr);
+      if (!LoopSchedules.count(PL))
+        break;
+
       auto &PSchedulePair = LoopSchedules[PL];
       PSchedulePair.first =
           combineInSequence(PSchedulePair.first, LSchedulePair.first);
@@ -3225,6 +3346,27 @@ bool ScopInfo::buildScalarDependences(Instruction *Inst, Region *R,
     if (UseParent == ParentBB && !isa<PHINode>(UI))
       continue;
 
+    // Uses by PHI nodes in the entry node count as external uses in case the
+    // use is through an incoming block that is itself not contained in the
+    // region.
+    if (R->getEntry() == UseParent) {
+      if (auto *PHI = dyn_cast<PHINode>(UI)) {
+        bool ExternalUse = false;
+        for (unsigned i = 0; i < PHI->getNumIncomingValues(); i++) {
+          if (PHI->getIncomingValue(i) == Inst &&
+              !R->contains(PHI->getIncomingBlock(i))) {
+            ExternalUse = true;
+            break;
+          }
+        }
+
+        if (ExternalUse) {
+          AnyCrossStmtUse = true;
+          continue;
+        }
+      }
+    }
+
     // Do not build scalar dependences inside a non-affine subregion.
     if (NonAffineSubRegion && NonAffineSubRegion->contains(UseParent))
       continue;
@@ -3246,27 +3388,6 @@ bool ScopInfo::buildScalarDependences(Instruction *Inst, Region *R,
     if (!R->contains(UseParent)) {
       AnyCrossStmtUse = true;
       continue;
-    }
-
-    // Uses by PHI nodes in the entry node count as external uses in case the
-    // use is through an incoming block that is itself not contained in the
-    // region.
-    if (R->getEntry() == UseParent) {
-      if (auto *PHI = dyn_cast<PHINode>(UI)) {
-        bool ExternalUse = false;
-        for (unsigned i = 0; i < PHI->getNumIncomingValues(); i++) {
-          if (PHI->getIncomingValue(i) == Inst &&
-              !R->contains(PHI->getIncomingBlock(i))) {
-            ExternalUse = true;
-            break;
-          }
-        }
-
-        if (ExternalUse) {
-          AnyCrossStmtUse = true;
-          continue;
-        }
-      }
     }
 
     // If the instruction can be synthesized and the user is in the region
@@ -3519,20 +3640,15 @@ void ScopInfo::addMemoryAccess(BasicBlock *BB, Instruction *Inst,
     return;
 
   AccFuncSetType &AccList = AccFuncMap[BB];
-  size_t Identifier = AccList.size();
-
   Value *BaseAddr = BaseAddress;
   std::string BaseName = getIslCompatibleName("MemRef_", BaseAddr, "");
-
-  std::string IdName = "__polly_array_ref_" + std::to_string(Identifier);
-  isl_id *Id = isl_id_alloc(ctx, IdName.c_str(), nullptr);
 
   bool isApproximated =
       Stmt->isRegionStmt() && (Stmt->getRegion()->getEntry() != BB);
   if (isApproximated && Type == MemoryAccess::MUST_WRITE)
     Type = MemoryAccess::MAY_WRITE;
 
-  AccList.emplace_back(Stmt, Inst, Id, Type, BaseAddress, ElemBytes, Affine,
+  AccList.emplace_back(Stmt, Inst, Type, BaseAddress, ElemBytes, Affine,
                        Subscripts, Sizes, AccessValue, Origin, BaseName);
   Stmt->addAccess(&AccList.back());
 }
