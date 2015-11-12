@@ -34,6 +34,7 @@
 using namespace llvm;
 
 namespace llvm {
+class AssumptionCache;
 class Loop;
 class LoopInfo;
 class PHINode;
@@ -66,6 +67,17 @@ class ScopInfo;
 
 //===---------------------------------------------------------------------===//
 
+/// @brief Enumeration of assumptions Polly can take.
+enum AssumptionKind {
+  ALIASING,
+  INBOUNDS,
+  WRAPPING,
+  ERRORBLOCK,
+  INFINITELOOP,
+  INVARIANTLOAD,
+  DELINEARIZATION,
+};
+
 /// Maps from a loop to the affine function expressing its backedge taken count.
 /// The backedge taken count already enough to express iteration domain as we
 /// only allow loops with canonical induction variable.
@@ -84,16 +96,29 @@ typedef std::map<const BasicBlock *, AccFuncSetType> AccFuncMapType;
 ///
 class ScopArrayInfo {
 public:
+  /// @brief The type of a memory access.
+  enum ARRAYKIND {
+    // Scalar references to SSA values.
+    KIND_SCALAR,
+
+    // Scalar references used to model PHI nodes
+    KIND_PHI,
+
+    // References to (multi-dimensional) arrays
+    KIND_ARRAY,
+  };
+
   /// @brief Construct a ScopArrayInfo object.
   ///
   /// @param BasePtr        The array base pointer.
   /// @param ElementType    The type of the elements stored in the array.
   /// @param IslCtx         The isl context used to create the base pointer id.
   /// @param DimensionSizes A vector containing the size of each dimension.
-  /// @param IsPHI          Is this a PHI node specific array info object.
+  /// @param Kind           The kind of the array object.
   /// @param S              The scop this array object belongs to.
   ScopArrayInfo(Value *BasePtr, Type *ElementType, isl_ctx *IslCtx,
-                ArrayRef<const SCEV *> DimensionSizes, bool IsPHI, Scop *S);
+                ArrayRef<const SCEV *> DimensionSizes, enum ARRAYKIND Kind,
+                Scop *S);
 
   ///  @brief Update the sizes of the ScopArrayInfo object.
   ///
@@ -127,15 +152,25 @@ public:
   unsigned getNumberOfDimensions() const { return DimensionSizes.size(); }
 
   /// @brief Return the size of dimension @p dim as SCEV*.
-  const SCEV *getDimensionSize(unsigned dim) const {
-    assert(dim < getNumberOfDimensions() && "Invalid dimension");
-    return DimensionSizes[dim];
+  //
+  //  Scalars do not have array dimensions and the first dimension of
+  //  a (possibly multi-dimensional) array also does not carry any size
+  //  information.
+  const SCEV *getDimensionSize(unsigned Dim) const {
+    assert(Dim > 0 && "Only dimensions larger than zero are sized.");
+    assert(Dim < getNumberOfDimensions() && "Invalid dimension");
+    return DimensionSizes[Dim - 1];
   }
 
   /// @brief Return the size of dimension @p dim as isl_pw_aff.
-  __isl_give isl_pw_aff *getDimensionSizePw(unsigned dim) const {
-    assert(dim < getNumberOfDimensions() && "Invalid dimension");
-    return isl_pw_aff_copy(DimensionSizesPw[dim - 1]);
+  //
+  //  Scalars do not have array dimensions and the first dimension of
+  //  a (possibly multi-dimensional) array also does not carry any size
+  //  information.
+  __isl_give isl_pw_aff *getDimensionSizePw(unsigned Dim) const {
+    assert(Dim > 0 && "Only dimensions larger than zero are sized.");
+    assert(Dim < getNumberOfDimensions() && "Invalid dimension");
+    return isl_pw_aff_copy(DimensionSizesPw[Dim - 1]);
   }
 
   /// @brief Get the type of the elements stored in this array.
@@ -160,7 +195,7 @@ public:
   /// original PHI node as virtual base pointer, we have this additional
   /// attribute to distinguish the PHI node specific array modeling from the
   /// normal scalar array modeling.
-  bool isPHI() const { return IsPHI; };
+  bool isPHI() const { return Kind == KIND_PHI; };
 
   /// @brief Dump a readable representation to stderr.
   void dump() const;
@@ -206,8 +241,10 @@ private:
   /// @brief The sizes of each dimension as isl_pw_aff.
   SmallVector<isl_pw_aff *, 4> DimensionSizesPw;
 
-  /// @brief Is this PHI node specific storage?
-  bool IsPHI;
+  /// @brief The type of this scop array info object.
+  ///
+  /// We distinguish between SCALAR, PHI and ARRAY objects.
+  enum ARRAYKIND Kind;
 
   /// @brief The scop this SAI object belongs to.
   Scop &S;
@@ -1033,6 +1070,9 @@ private:
   /// @brief True if the underlying region has a single exiting block.
   bool HasSingleExitEdge;
 
+  /// @brief Flag to remember if the SCoP contained an error block or not.
+  bool HasErrorBlock;
+
   /// Max loop depth.
   unsigned MaxLoopDepth;
 
@@ -1156,7 +1196,7 @@ private:
        unsigned MaxLoopDepth);
 
   /// @brief Initialize this ScopInfo .
-  void init(AliasAnalysis &AA);
+  void init(AliasAnalysis &AA, AssumptionCache &AC);
 
   /// @brief Add loop carried constraints to the header block of the loop @p L.
   ///
@@ -1241,7 +1281,10 @@ private:
   /// @brief Build the BoundaryContext based on the wrapping of expressions.
   void buildBoundaryContext();
 
-  /// @brief Add user provided parameter constraints to context.
+  /// @brief Add user provided parameter constraints to context (source code).
+  void addUserAssumptions(AssumptionCache &AC);
+
+  /// @brief Add user provided parameter constraints to context (command line).
   void addUserContext();
 
   /// @brief Add the bounds of the parameters to the context.
@@ -1270,7 +1313,7 @@ private:
   ///
   /// @param BB         The basic block we build the statement for (or null)
   /// @param R          The region we build the statement for (or null).
-  ScopStmt *addScopStmt(BasicBlock *BB, Region *R);
+  void addScopStmt(BasicBlock *BB, Region *R);
 
   /// @param Update access dimensionalities.
   ///
@@ -1288,6 +1331,15 @@ private:
   void buildSchedule(
       Region *R,
       DenseMap<Loop *, std::pair<isl_schedule *, unsigned>> &LoopSchedules);
+
+  /// @brief Collect all memory access relations of a given type.
+  ///
+  /// @param Predicate A predicate function that returns true if an access is
+  ///                  of a given type.
+  ///
+  /// @returns The set of memory accesses in the scop that match the predicate.
+  __isl_give isl_union_map *
+  getAccessesOfType(std::function<bool(MemoryAccess &)> Predicate);
 
   /// @name Helper function for printing the Scop.
   ///
@@ -1425,6 +1477,17 @@ public:
   /// @returns True if the optimized SCoP can be executed.
   bool hasFeasibleRuntimeContext() const;
 
+  /// @brief Track and report an assumption.
+  ///
+  /// Use 'clang -Rpass-analysis=polly-scops' or 'opt -pass-remarks=polly-scops'
+  /// to output the assumptions.
+  ///
+  /// @param Kind The assumption kind describing the underlying cause.
+  /// @param Set  The relations between parameters that are assumed to hold.
+  /// @param Loc  The location in the source that caused this assumption.
+  void trackAssumption(AssumptionKind Kind, __isl_keep isl_set *Set,
+                       DebugLoc Loc);
+
   /// @brief Add assumptions to assumed context.
   ///
   /// The assumptions added will be assumed to hold during the execution of the
@@ -1436,9 +1499,11 @@ public:
   ///          that assumptions do not change the set of statement instances
   ///          executed.
   ///
-  /// @param Set A set describing relations between parameters that are assumed
-  ///            to hold.
-  void addAssumption(__isl_take isl_set *Set);
+  /// @param Kind The assumption kind describing the underlying cause.
+  /// @param Set  The relations between parameters that are assumed to hold.
+  /// @param Loc  The location in the source that caused this assumption.
+  void addAssumption(AssumptionKind Kind, __isl_take isl_set *Set,
+                     DebugLoc Loc);
 
   /// @brief Get the boundary context for this Scop.
   ///
@@ -1497,23 +1562,26 @@ public:
   /// @brief Return the (possibly new) ScopArrayInfo object for @p Access.
   ///
   /// @param ElementType The type of the elements stored in this array.
-  /// @param IsPHI       Is this ScopArrayInfo object modeling special
-  ///                    PHI node storage.
+  /// @param Kind The kind of array info object.
   const ScopArrayInfo *getOrCreateScopArrayInfo(Value *BasePtr,
                                                 Type *ElementType,
                                                 ArrayRef<const SCEV *> Sizes,
-                                                bool IsPHI = false);
+                                                ScopArrayInfo::ARRAYKIND Kind);
 
   /// @brief Return the cached ScopArrayInfo object for @p BasePtr.
   ///
-  /// @param BasePtr The base pointer the object has been stored for
-  /// @param IsPHI   Are we looking for special PHI storage.
-  const ScopArrayInfo *getScopArrayInfo(Value *BasePtr, bool IsPHI = false);
+  /// @param BasePtr  The base pointer the object has been stored for.
+  /// @param Kind The kind of array info object.
+  const ScopArrayInfo *getScopArrayInfo(Value *BasePtr,
+                                        ScopArrayInfo::ARRAYKIND Kind);
 
   void setContext(isl_set *NewContext);
 
   /// @brief Align the parameters in the statement to the scop context
   void realignParams();
+
+  /// @brief Return true if the SCoP contained at least one error block.
+  bool hasErrorBlock() const { return HasErrorBlock; }
 
   /// @brief Return true if the underlying region has a single exiting block.
   bool hasSingleExitEdge() const { return HasSingleExitEdge; }
@@ -1562,6 +1630,9 @@ public:
 
   /// @brief Get a union map of all reads performed in the SCoP.
   __isl_give isl_union_map *getReads();
+
+  /// @brief Get a union map of all memory accesses performed in the SCoP.
+  __isl_give isl_union_map *getAccesses();
 
   /// @brief Get the schedule of all the statements in the SCoP.
   __isl_give isl_union_map *getSchedule() const;
@@ -1643,7 +1714,7 @@ class ScopInfo : public RegionPass {
   void clear();
 
   // Build the SCoP for Region @p R.
-  void buildScop(Region &R, DominatorTree &DT);
+  void buildScop(Region &R, DominatorTree &DT, AssumptionCache &AC);
 
   /// @brief Build an instance of MemoryAccess from the Load/Store instruction.
   ///
