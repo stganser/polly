@@ -22,18 +22,6 @@
 #include <isl_config.h>
 
 /*
- * Needed to print out the number of iterations of the PIP solver that are
- * made to find a lexically minimal solution for a schedule row.
- */
-#include <stdio.h>
-
-/*
- * Needed to measure the time that the PIP solver needs to find a lexically
- * minimal solution for a schedule row.
- */
-#include <time.h>
-
-/*
  * The implementation of parametric integer linear programming in this file
  * was inspired by the paper "Parametric Integer Programming" and the
  * report "Solving systems of affine (in)equalities" by Paul Feautrier
@@ -5098,16 +5086,13 @@ __isl_give isl_vec *isl_tab_basic_set_non_trivial_lexmin(
 	struct isl_trivial *triv = NULL;
 	int level, init;
 
-	int num_iterations = 0;
-
-      if (!bset)
-        return NULL;
+	if (!bset)
+		return NULL;
 
 	ctx = isl_basic_set_get_ctx(bset);
 	sol = isl_vec_alloc(ctx, 0);
 
 	tab = tab_for_lexmin(bset, NULL, 0, 0);
-
 	if (!tab)
 		goto error;
 	tab->conflict = conflict;
@@ -5123,11 +5108,6 @@ __isl_give isl_vec *isl_tab_basic_set_non_trivial_lexmin(
 
 	while (level >= 0) {
 		int side, base;
-
-		/*
-		 * Count the number of iterations of this loop.
-		 */
-		num_iterations++;
 
 		if (init) {
 			tab = cut_to_integer_lexmin(tab, CUT_ONE);

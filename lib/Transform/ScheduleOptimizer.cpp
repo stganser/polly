@@ -582,7 +582,6 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   S.setScheduleTree(NewSchedule);
   S.markAsOptimized();
-  LastSchedule = NewSchedule;
 
   isl_union_map_free(NewScheduleMap);
   return false;
