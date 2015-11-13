@@ -151,13 +151,13 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
     if (u + 1 >= e)
       break;
 
-    const SCEV *DimSCEV = SAI->getDimensionSize(u - 1);
+    const SCEV *DimSCEV = SAI->getDimensionSize(u);
 
     llvm::ValueToValueMap Map(GlobalMap.begin(), GlobalMap.end());
     DimSCEV = SCEVParameterRewriter::rewrite(DimSCEV, SE, Map);
     Value *DimSize =
         expandCodeFor(S, SE, DL, "polly", DimSCEV, DimSCEV->getType(),
-                      Builder.GetInsertPoint());
+                      &*Builder.GetInsertPoint());
 
     Type *Ty = getWidestType(DimSize->getType(), IndexOp->getType());
 
@@ -495,7 +495,7 @@ IslExprBuilder::createOpBooleanConditional(__isl_take isl_ast_expr *Expr) {
 
   auto InsertBB = Builder.GetInsertBlock();
   auto InsertPoint = Builder.GetInsertPoint();
-  auto NextBB = SplitBlock(InsertBB, InsertPoint, &DT, &LI);
+  auto NextBB = SplitBlock(InsertBB, &*InsertPoint, &DT, &LI);
   BasicBlock *CondBB = BasicBlock::Create(Context, "polly.cond", F);
   LI.changeLoopFor(CondBB, LI.getLoopFor(InsertBB));
   DT.addNewBlock(CondBB, InsertBB);
@@ -612,6 +612,8 @@ Value *IslExprBuilder::createId(__isl_take isl_ast_expr *Expr) {
   assert(IDToValue.count(Id) && "Identifier not found");
 
   V = IDToValue[Id];
+  if (!V)
+    V = UndefValue::get(getType(Expr));
 
   assert(V && "Unknown parameter id found");
 

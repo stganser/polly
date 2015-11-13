@@ -147,18 +147,32 @@ public:
     // parameters they reference. Afterwards, for the remaining parameters that
     // might reference the hoisted loads. Finally, build the runtime check
     // that might reference both hoisted loads as well as parameters.
+    // If the hoisting fails we have to bail and execute the original code.
     Builder.SetInsertPoint(SplitBlock->getTerminator());
-    NodeBuilder.preloadInvariantLoads();
-    NodeBuilder.addParameters(S.getContext());
+    if (!NodeBuilder.preloadInvariantLoads()) {
 
-    Value *RTC = buildRTC(Builder, NodeBuilder.getExprBuilder());
-    Builder.GetInsertBlock()->getTerminator()->setOperand(0, RTC);
-    Builder.SetInsertPoint(StartBlock->begin());
+      auto *FalseI1 = Builder.getFalse();
+      auto *SplitBBTerm = Builder.GetInsertBlock()->getTerminator();
+      SplitBBTerm->setOperand(0, FalseI1);
+      auto *StartBBTerm = StartBlock->getTerminator();
+      Builder.SetInsertPoint(StartBBTerm);
+      Builder.CreateUnreachable();
+      StartBBTerm->eraseFromParent();
+      isl_ast_node_free(AstRoot);
 
-    NodeBuilder.create(AstRoot);
+    } else {
 
-    NodeBuilder.finalizeSCoP(S);
-    fixRegionInfo(EnteringBB->getParent(), R->getParent());
+      NodeBuilder.addParameters(S.getContext());
+
+      Value *RTC = buildRTC(Builder, NodeBuilder.getExprBuilder());
+      Builder.GetInsertBlock()->getTerminator()->setOperand(0, RTC);
+      Builder.SetInsertPoint(&StartBlock->front());
+
+      NodeBuilder.create(AstRoot);
+
+      NodeBuilder.finalizeSCoP(S);
+      fixRegionInfo(EnteringBB->getParent(), R->getParent());
+    }
 
     assert(!verifyGeneratedFunction(S, *EnteringBB->getParent()) &&
            "Verification of generated function failed");
