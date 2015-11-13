@@ -164,8 +164,8 @@ static const ScopArrayInfo *identifyBasePtrOriginSAI(Scop *S, Value *BasePtr) {
 
 ScopArrayInfo::ScopArrayInfo(Value *BasePtr, Type *ElementType, isl_ctx *Ctx,
                              ArrayRef<const SCEV *> Sizes, enum ARRAYKIND Kind,
-                             Scop *S)
-    : BasePtr(BasePtr), ElementType(ElementType), Kind(Kind), S(*S) {
+                             const DataLayout &DL, Scop *S)
+    : BasePtr(BasePtr), ElementType(ElementType), Kind(Kind), DL(DL), S(*S) {
   std::string BasePtrName =
       getIslCompatibleName("MemRef_", BasePtr, Kind == KIND_PHI ? "__phi" : "");
   Id = isl_id_alloc(Ctx, BasePtrName.c_str(), this);
@@ -216,7 +216,7 @@ ScopArrayInfo::~ScopArrayInfo() {
 std::string ScopArrayInfo::getName() const { return isl_id_get_name(Id); }
 
 int ScopArrayInfo::getElemSizeInBytes() const {
-  return ElementType->getPrimitiveSizeInBits() / 8;
+  return DL.getTypeAllocSize(ElementType);
 }
 
 isl_id *ScopArrayInfo::getBasePtrId() const { return isl_id_copy(Id); }
@@ -601,6 +601,32 @@ __isl_give isl_map *MemoryAccess::foldAccess(__isl_take isl_map *AccessRelation,
   return AccessRelation;
 }
 
+/// @brief Check if @p Expr is divisible by @p Size.
+static bool isDivisible(const SCEV *Expr, unsigned Size, ScalarEvolution &SE) {
+
+  // Only one factor needs to be divisible.
+  if (auto *MulExpr = dyn_cast<SCEVMulExpr>(Expr)) {
+    for (auto *FactorExpr : MulExpr->operands())
+      if (isDivisible(FactorExpr, Size, SE))
+        return true;
+    return false;
+  }
+
+  // For other n-ary expressions (Add, AddRec, Max,...) all operands need
+  // to be divisble.
+  if (auto *NAryExpr = dyn_cast<SCEVNAryExpr>(Expr)) {
+    for (auto *OpExpr : NAryExpr->operands())
+      if (!isDivisible(OpExpr, Size, SE))
+        return false;
+    return true;
+  }
+
+  auto *SizeSCEV = SE.getConstant(Expr->getType(), Size);
+  auto *UDivSCEV = SE.getUDivExpr(Expr, SizeSCEV);
+  auto *MulSCEV = SE.getMulExpr(UDivSCEV, SizeSCEV);
+  return MulSCEV == Expr;
+}
+
 void MemoryAccess::buildAccessRelation(const ScopArrayInfo *SAI) {
   assert(!AccessRelation && "AccessReltation already built");
 
@@ -620,6 +646,7 @@ void MemoryAccess::buildAccessRelation(const ScopArrayInfo *SAI) {
     return;
   }
 
+  Scop &S = *getStatement()->getParent();
   isl_space *Space = isl_space_alloc(Ctx, 0, Statement->getNumIterators(), 0);
   AccessRelation = isl_map_universe(Space);
 
@@ -634,9 +661,14 @@ void MemoryAccess::buildAccessRelation(const ScopArrayInfo *SAI) {
       // LLVM-IR as something like A[i * elementsize]. This hides the fact that
       // two subsequent values of 'i' index two values that are stored next to
       // each other in memory. By this division we make this characteristic
-      // obvious again.
+      // obvious again. However, if the index is not divisible by the element
+      // size we will bail out.
       isl_val *v = isl_val_int_from_si(Ctx, getElemSizeInBytes());
       Affine = isl_pw_aff_scale_down_val(Affine, v);
+
+      if (!isDivisible(Subscripts[0], getElemSizeInBytes(), *S.getSE()))
+        S.addAssumption(ALIGNMENT, isl_set_empty(S.getParamSpace()),
+                        AccessInstruction->getDebugLoc());
     }
 
     isl_map *SubscriptMap = isl_map_from_pw_aff(Affine);
@@ -2863,8 +2895,9 @@ Scop::getOrCreateScopArrayInfo(Value *BasePtr, Type *AccessType,
                                ScopArrayInfo::ARRAYKIND Kind) {
   auto &SAI = ScopArrayInfoMap[std::make_pair(BasePtr, Kind)];
   if (!SAI) {
-    SAI.reset(
-        new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Sizes, Kind, this));
+    auto &DL = getRegion().getEntry()->getModule()->getDataLayout();
+    SAI.reset(new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Sizes, Kind,
+                                DL, this));
   } else {
     // In case of mismatching array sizes, we bail out by setting the run-time
     // context to false.
@@ -2940,6 +2973,8 @@ static std::string toString(AssumptionKind Kind) {
     return "Inbounds";
   case WRAPPING:
     return "No-overflows";
+  case ALIGNMENT:
+    return "Alignment";
   case ERRORBLOCK:
     return "No-error";
   case INFINITELOOP:
@@ -3573,13 +3608,13 @@ void ScopInfo::buildMemoryAccess(
 
   if (LoadInst *Load = dyn_cast<LoadInst>(Inst)) {
     SizeType = Load->getType();
-    Size = TD->getTypeStoreSize(SizeType);
+    Size = TD->getTypeAllocSize(SizeType);
     Type = MemoryAccess::READ;
     Val = Load;
   } else {
     StoreInst *Store = cast<StoreInst>(Inst);
     SizeType = Store->getValueOperand()->getType();
-    Size = TD->getTypeStoreSize(SizeType);
+    Size = TD->getTypeAllocSize(SizeType);
     Type = MemoryAccess::MUST_WRITE;
     Val = Store->getValueOperand();
   }
