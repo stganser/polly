@@ -45,10 +45,6 @@
 #include "isl/union_map.h"
 #include "isl/union_set.h"
 
-#ifdef POLLY_CODE_GEN_TIME_LOGGING
-#include <iostream>
-#endif
-
 using namespace polly;
 using namespace llvm;
 
