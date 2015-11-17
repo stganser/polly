@@ -1603,17 +1603,25 @@ __isl_give isl_id *Scop::getIdForParam(const SCEV *Parameter) {
 
   std::string ParameterName;
 
+  ParameterName = "p_" + utostr_32(IdIter->second);
+
   if (const SCEVUnknown *ValueParameter = dyn_cast<SCEVUnknown>(Parameter)) {
     Value *Val = ValueParameter->getValue();
-    ParameterName = Val->getName();
-    if (!Val->hasName())
-      if (LoadInst *LI = dyn_cast<LoadInst>(Val))
-        ParameterName =
-            LI->getPointerOperand()->stripInBoundsOffsets()->getName();
-  }
 
-  if (ParameterName == "" || ParameterName.substr(0, 2) == "p_")
-    ParameterName = "p_" + utostr_32(IdIter->second);
+    // If this parameter references a specific Value and this value has a name
+    // we use this name as it is likely to be unique and more useful than just
+    // a number.
+    if (Val->hasName())
+      ParameterName = Val->getName();
+    else if (LoadInst *LI = dyn_cast<LoadInst>(Val)) {
+      auto LoadOrigin = LI->getPointerOperand()->stripInBoundsOffsets();
+      if (LoadOrigin->hasName()) {
+        ParameterName += "_loaded_from_";
+        ParameterName +=
+            LI->getPointerOperand()->stripInBoundsOffsets()->getName();
+      }
+    }
+  }
 
   return isl_id_alloc(getIslCtx(), ParameterName.c_str(),
                       const_cast<void *>((const void *)Parameter));
@@ -1634,6 +1642,7 @@ void Scop::buildBoundaryContext() {
   // TODO: We can probably get around using isl_set_complement and directly
   // AST generate BoundaryContext.
   long MaxOpsOld = isl_ctx_get_max_operations(getIslCtx());
+  isl_ctx_reset_operations(getIslCtx());
   isl_ctx_set_max_operations(getIslCtx(), 300000);
   isl_options_set_on_error(getIslCtx(), ISL_ON_ERROR_CONTINUE);
 
