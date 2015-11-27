@@ -23,6 +23,7 @@
 #include "polly/Support/GICHelper.h"
 #include "polly/Support/SCEVValidator.h"
 #include "polly/Support/ScopHelper.h"
+#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
@@ -98,6 +99,12 @@ static cl::opt<int> MaxDisjunctsAssumed(
     cl::desc("The maximal number of disjuncts we allow in the assumption "
              "context (this bounds compile time)"),
     cl::Hidden, cl::ZeroOrMore, cl::init(150), cl::cat(PollyCategory));
+
+static cl::opt<bool> IgnoreIntegerWrapping(
+    "polly-ignore-integer-wrapping",
+    cl::desc("Do not build run-time checks to proof absence of integer "
+             "wrapping"),
+    cl::Hidden, cl::ZeroOrMore, cl::init(false), cl::cat(PollyCategory));
 
 //===----------------------------------------------------------------------===//
 
@@ -876,6 +883,8 @@ void ScopStmt::buildAccessRelations() {
     ScopArrayInfo::ARRAYKIND Ty;
     if (Access->isPHI())
       Ty = ScopArrayInfo::KIND_PHI;
+    else if (Access->isExitPHI())
+      Ty = ScopArrayInfo::KIND_EXIT_PHI;
     else if (Access->isImplicit())
       Ty = ScopArrayInfo::KIND_SCALAR;
     else
@@ -1633,6 +1642,11 @@ isl_set *Scop::addNonEmptyDomainConstraints(isl_set *C) const {
 }
 
 void Scop::buildBoundaryContext() {
+  if (IgnoreIntegerWrapping) {
+    BoundaryContext = isl_set_universe(getParamSpace());
+    return;
+  }
+
   BoundaryContext = Affinator.getWrappingContext();
 
   // The isl_set_complement operation used to create the boundary context
@@ -2005,6 +2019,38 @@ isl_set *Scop::getDomainConditions(BasicBlock *BB) {
   return isl_set_copy(DomainMap[BB]);
 }
 
+void Scop::removeErrorBlockDomains() {
+  auto removeDomains = [this](BasicBlock *Start) {
+    auto BBNode = DT.getNode(Start);
+    for (auto ErrorChild : depth_first(BBNode)) {
+      auto ErrorChildBlock = ErrorChild->getBlock();
+      auto CurrentDomain = DomainMap[ErrorChildBlock];
+      auto Empty = isl_set_empty(isl_set_get_space(CurrentDomain));
+      DomainMap[ErrorChildBlock] = Empty;
+      isl_set_free(CurrentDomain);
+    }
+  };
+
+  SmallVector<Region *, 4> Todo = {&R};
+
+  while (!Todo.empty()) {
+    auto SubRegion = Todo.back();
+    Todo.pop_back();
+
+    if (!SD.isNonAffineSubRegion(SubRegion, &getRegion())) {
+      for (auto &Child : *SubRegion)
+        Todo.push_back(Child.get());
+      continue;
+    }
+    if (containsErrorBlock(SubRegion->getNode(), getRegion(), LI, DT))
+      removeDomains(SubRegion->getEntry());
+  }
+
+  for (auto BB : R.blocks())
+    if (isErrorBlock(*BB, R, LI, DT))
+      removeDomains(BB);
+}
+
 void Scop::buildDomains(Region *R) {
 
   auto *EntryBB = R->getEntry();
@@ -2024,6 +2070,16 @@ void Scop::buildDomains(Region *R) {
 
   buildDomainsWithBranchConstraints(R);
   propagateDomainConstraints(R);
+
+  // Error blocks and blocks dominated by them have been assumed to never be
+  // executed. Representing them in the Scop does not add any value. In fact,
+  // it is likely to cause issues during construction of the ScopStmts. The
+  // contents of error blocks have not been verfied to be expressible and
+  // will cause problems when building up a ScopStmt for them.
+  // Furthermore, basic blocks dominated by error blocks may reference
+  // instructions in the error block which, if the error block is not modeled,
+  // can themselves not be constructed properly.
+  removeErrorBlockDomains();
 }
 
 void Scop::buildDomainsWithBranchConstraints(Region *R) {
@@ -2551,8 +2607,23 @@ bool Scop::buildAliasGroups(AliasAnalysis &AA) {
   return true;
 }
 
+/// @brief Get the smallest loop that contains @p R but is not in @p R.
 static Loop *getLoopSurroundingRegion(Region &R, LoopInfo &LI) {
+  // Start with the smallest loop containing the entry and expand that
+  // loop until it contains all blocks in the region. If there is a loop
+  // containing all blocks in the region check if it is itself contained
+  // and if so take the parent loop as it will be the smallest containing
+  // the region but not contained by it.
   Loop *L = LI.getLoopFor(R.getEntry());
+  while (L) {
+    bool AllContained = true;
+    for (auto *BB : R.blocks())
+      AllContained &= L->contains(BB);
+    if (AllContained)
+      break;
+    L = L->getParentLoop();
+  }
+
   return L ? (R.contains(L) ? L->getParentLoop() : L) : nullptr;
 }
 
@@ -3863,7 +3934,7 @@ void ScopInfo::addPHIWriteAccess(PHINode *PHI, BasicBlock *IncomingBlock,
   addMemoryAccess(IncomingBlock, IncomingBlock->getTerminator(),
                   MemoryAccess::MUST_WRITE, PHI, 1, true, IncomingValue,
                   ArrayRef<const SCEV *>(), ArrayRef<const SCEV *>(),
-                  IsExitBlock ? MemoryAccess::SCALAR : MemoryAccess::PHI);
+                  IsExitBlock ? MemoryAccess::EXIT_PHI : MemoryAccess::PHI);
 }
 void ScopInfo::addPHIReadAccess(PHINode *PHI) {
   addMemoryAccess(PHI->getParent(), PHI, MemoryAccess::READ, PHI, 1, true, PHI,
