@@ -216,7 +216,8 @@ bool JSONImporter::runOnScop(Scop &S) {
   std::error_code ec = result.getError();
 
   if (ec) {
-    errs() << "File could not be read: " << ec.message() << "\n";
+    std::string errMsg = "File could not be read: " + ec.message();
+    errs() << errMsg << '\n';
     report_fatal_error(errMsg, false);
   }
 
@@ -226,7 +227,8 @@ bool JSONImporter::runOnScop(Scop &S) {
   bool parsingSuccessful = reader.parse(result.get()->getBufferStart(), jscop);
 
   if (!parsingSuccessful) {
-    errs() << "JSCoP file could not be parsed\n";
+    std::string errMsg = "JSCoP file could not be parsed";
+    errs() << errMsg << '\n';
     report_fatal_error(errMsg, false);
   }
 
@@ -265,8 +267,10 @@ bool JSONImporter::runOnScop(Scop &S) {
   }
 
   if (!D.isValidSchedule(S, &NewSchedule)) {
-    errs() << "JScop file contains a schedule that changes the "
-           << "dependences. Use -disable-polly-legality to continue anyways\n";
+    std::string errMsg = "JScop file contains a schedule that changes the "
+                         "dependences. Use -disable-polly-legality to continue "
+                         "anyways";
+    errs() << errMsg << '\n';
     for (StatementToIslMapTy::iterator SI = NewSchedule.begin(),
                                        SE = NewSchedule.end();
          SI != SE; ++SI)
@@ -296,7 +300,9 @@ bool JSONImporter::runOnScop(Scop &S) {
 
       if (isl_map_dim(newAccessMap, isl_dim_param) !=
           isl_map_dim(currentAccessMap, isl_dim_param)) {
-        errs() << "JScop file changes the number of parameter dimensions\n";
+        std::string errMsg = "JScop file changes the number of parameter "
+                             "dimensions";
+        errs() << errMsg << '\n';
         isl_map_free(currentAccessMap);
         isl_map_free(newAccessMap);
         report_fatal_error(errMsg, false);
@@ -329,7 +335,8 @@ bool JSONImporter::runOnScop(Scop &S) {
           isl_set_free(currentAccessSet);
 
           if (!isSubset) {
-            errs() << "JScop file changes the accessed memory\n";
+            std::string errMsg = "JScop file changes the accessed memory";
+            errs() << errMsg << '\n';
             isl_map_free(currentAccessMap);
             isl_map_free(newAccessMap);
             report_fatal_error(errMsg, false);
@@ -352,8 +359,9 @@ bool JSONImporter::runOnScop(Scop &S) {
       newAccessMap = isl_map_set_tuple_id(newAccessMap, isl_dim_in, Id);
 
       if (!isl_map_has_equal_space(currentAccessMap, newAccessMap)) {
-        errs() << "JScop file contains access function with incompatible "
-               << "dimensions\n";
+        std::string errMsg = "JScop file contains access function with incompatible "
+                "dimensions";
+        errs() << errMsg << '\n';
         isl_map_free(currentAccessMap);
         isl_map_free(newAccessMap);
         report_fatal_error(errMsg, false);
@@ -369,7 +377,9 @@ bool JSONImporter::runOnScop(Scop &S) {
 
       if (isl_set_is_subset(CurrentAccessDomain, NewAccessDomain) ==
           isl_bool_false) {
-        errs() << "Mapping not defined for all iteration domain elements\n";
+        std::string errMsg = "Mapping not defined for all iteration domain "
+                             "elements";
+        errs() << errMsg << '\n';
         isl_set_free(CurrentAccessDomain);
         isl_set_free(NewAccessDomain);
         isl_map_free(currentAccessMap);
