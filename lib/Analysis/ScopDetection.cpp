@@ -44,10 +44,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "polly/ScopDetection.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
-#include "polly/ScopDetection.h"
 #include "polly/ScopDetectionDiagnostic.h"
 #include "polly/Support/SCEVValidator.h"
 #include "polly/Support/ScopLocation.h"
@@ -65,11 +65,22 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/Debug.h"
 #include <set>
+#include <stack>
 
 using namespace llvm;
 using namespace polly;
 
 #define DEBUG_TYPE "polly-detect"
+
+// This option is set to a very high value, as analyzing such loops increases
+// compile time on several cases. For experiments that enable this option,
+// a value of around 40 has been working to avoid run-time regressions with
+// Polly while still exposing interesting optimization opportunities.
+static cl::opt<int> ProfitabilityMinPerLoopInstructions(
+    "polly-detect-profitability-min-per-loop-insts",
+    cl::desc("The minimal number of per-loop instructions before a single loop "
+             "region is considered profitable"),
+    cl::Hidden, cl::ValueRequired, cl::init(100000000), cl::cat(PollyCategory));
 
 bool polly::PollyProcessUnprofitable;
 static cl::opt<bool, true> XPollyProcessUnprofitable(
@@ -524,7 +535,7 @@ public:
   const SCEV *visitUDivExpr(const SCEVUDivExpr *Expr) { return Expr; }
 
   const SCEV *visitSMaxExpr(const SCEVSMaxExpr *Expr) {
-    if (Expr->getOperand(0)->isZero()) {
+    if ((Expr->getNumOperands() == 2) && Expr->getOperand(0)->isZero()) {
       auto Res = visit(Expr->getOperand(1));
       if (Terms)
         (*Terms).push_back(Res);
@@ -534,7 +545,7 @@ public:
     return Expr;
   }
 
-  const SCEV *visitUMaxExpr(const SCEVUMaxExpr *Expr) { return visit(Expr); }
+  const SCEV *visitUMaxExpr(const SCEVUMaxExpr *Expr) { return Expr; }
 
   const SCEV *visitUnknown(const SCEVUnknown *Expr) { return Expr; }
 
@@ -643,7 +654,7 @@ bool ScopDetection::hasValidArraySizes(DetectionContext &Context,
       }
     }
     if (hasScalarDepsInsideRegion(DelinearizedSize, &CurRegion))
-      invalid<ReportNonAffineAccess>(
+      return invalid<ReportNonAffineAccess>(
           Context, /*Assert=*/true, DelinearizedSize,
           Context.Accesses[BasePointer].front().first, BaseValue);
   }
@@ -747,11 +758,11 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
   return true;
 }
 
-bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
+bool ScopDetection::isValidMemoryAccess(MemAccInst Inst,
                                         DetectionContext &Context) const {
   Region &CurRegion = Context.CurRegion;
 
-  Value *Ptr = getPointerOperand(Inst);
+  Value *Ptr = Inst.getPointerOperand();
   Loop *L = LI->getLoopFor(Inst.getParent());
   const SCEV *AccessFunction = SE->getSCEVAtScope(Ptr, L);
   const SCEVUnknown *BasePointer;
@@ -760,26 +771,26 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
   BasePointer = dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFunction));
 
   if (!BasePointer)
-    return invalid<ReportNoBasePtr>(Context, /*Assert=*/true, &Inst);
+    return invalid<ReportNoBasePtr>(Context, /*Assert=*/true, Inst);
 
   BaseValue = BasePointer->getValue();
 
   if (isa<UndefValue>(BaseValue))
-    return invalid<ReportUndefBasePtr>(Context, /*Assert=*/true, &Inst);
+    return invalid<ReportUndefBasePtr>(Context, /*Assert=*/true, Inst);
 
   // Check that the base address of the access is invariant in the current
   // region.
   if (!isInvariant(*BaseValue, CurRegion))
     return invalid<ReportVariantBasePtr>(Context, /*Assert=*/true, BaseValue,
-                                         &Inst);
+                                         Inst);
 
   AccessFunction = SE->getMinusSCEV(AccessFunction, BasePointer);
 
-  const SCEV *Size = SE->getElementSize(&Inst);
+  const SCEV *Size = SE->getElementSize(Inst);
   if (Context.ElementSize.count(BasePointer)) {
     if (Context.ElementSize[BasePointer] != Size)
       return invalid<ReportDifferentArrayElementSize>(Context, /*Assert=*/true,
-                                                      &Inst, BaseValue);
+                                                      Inst, BaseValue);
   } else {
     Context.ElementSize[BasePointer] = Size;
   }
@@ -792,7 +803,7 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
       isVariantInNonAffineLoop = true;
 
   if (PollyDelinearize && !isVariantInNonAffineLoop) {
-    Context.Accesses[BasePointer].push_back({&Inst, AccessFunction});
+    Context.Accesses[BasePointer].push_back({Inst, AccessFunction});
 
     if (!isAffine(AccessFunction, Context, BaseValue))
       Context.NonAffineAccesses.insert(BasePointer);
@@ -800,7 +811,7 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
     if (isVariantInNonAffineLoop ||
         !isAffine(AccessFunction, Context, BaseValue))
       return invalid<ReportNonAffineAccess>(Context, /*Assert=*/true,
-                                            AccessFunction, &Inst, BaseValue);
+                                            AccessFunction, Inst, BaseValue);
   }
 
   // FIXME: Think about allowing IntToPtrInst
@@ -842,7 +853,7 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
       if (CanBuildRunTimeCheck)
         return true;
     }
-    return invalid<ReportAlias>(Context, /*Assert=*/true, &Inst, AS);
+    return invalid<ReportAlias>(Context, /*Assert=*/true, Inst, AS);
   }
 
   return true;
@@ -876,19 +887,14 @@ bool ScopDetection::isValidInstruction(Instruction &Inst,
   }
 
   // Check the access function.
-  if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst)) {
-    Context.hasStores |= isa<StoreInst>(Inst);
-    Context.hasLoads |= isa<LoadInst>(Inst);
-    if (auto *Load = dyn_cast<LoadInst>(&Inst))
-      if (!Load->isSimple())
-        return invalid<ReportNonSimpleMemoryAccess>(Context, /*Assert=*/true,
-                                                    &Inst);
-    if (auto *Store = dyn_cast<StoreInst>(&Inst))
-      if (!Store->isSimple())
-        return invalid<ReportNonSimpleMemoryAccess>(Context, /*Assert=*/true,
-                                                    &Inst);
+  if (auto MemInst = MemAccInst::dyn_cast(Inst)) {
+    Context.hasStores |= MemInst.isLoad();
+    Context.hasLoads |= MemInst.isStore();
+    if (!MemInst.isSimple())
+      return invalid<ReportNonSimpleMemoryAccess>(Context, /*Assert=*/true,
+                                                  &Inst);
 
-    return isValidMemoryAccess(Inst, Context);
+    return isValidMemoryAccess(MemInst, Context);
   }
 
   // We do not know this instruction, therefore we assume it is invalid.
@@ -1134,6 +1140,50 @@ bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
   return true;
 }
 
+bool ScopDetection::hasSufficientCompute(DetectionContext &Context,
+                                         int NumLoops) const {
+  int InstCount = 0;
+
+  for (auto *BB : Context.CurRegion.blocks())
+    if (Context.CurRegion.contains(LI->getLoopFor(BB)))
+      InstCount += BB->size();
+
+  InstCount = InstCount / NumLoops;
+
+  return InstCount >= ProfitabilityMinPerLoopInstructions;
+}
+
+bool ScopDetection::isProfitableRegion(DetectionContext &Context) const {
+  Region &CurRegion = Context.CurRegion;
+
+  if (PollyProcessUnprofitable)
+    return true;
+
+  // We can probably not do a lot on scops that only write or only read
+  // data.
+  if (!Context.hasStores || !Context.hasLoads)
+    return invalid<ReportUnprofitable>(Context, /*Assert=*/true, &CurRegion);
+
+  int NumLoops = countBeneficialLoops(&CurRegion);
+  int NumAffineLoops = NumLoops - Context.BoxedLoopsSet.size();
+
+  // Scops with at least two loops may allow either loop fusion or tiling and
+  // are consequently interesting to look at.
+  if (NumAffineLoops >= 2)
+    return true;
+
+  // Scops that contain a loop with a non-trivial amount of computation per
+  // loop-iteration are interesting as we may be able to parallelize such
+  // loops. Individual loops that have only a small amount of computation
+  // per-iteration are performance-wise very fragile as any change to the
+  // loop induction variables may affect performance. To not cause spurious
+  // performance regressions, we do not consider such loops.
+  if (NumAffineLoops == 1 && hasSufficientCompute(Context, NumLoops))
+    return true;
+
+  return invalid<ReportUnprofitable>(Context, /*Assert=*/true, &CurRegion);
+}
+
 bool ScopDetection::isValidRegion(DetectionContext &Context) const {
   Region &CurRegion = Context.CurRegion;
 
@@ -1158,22 +1208,16 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
       &(CurRegion.getEntry()->getParent()->getEntryBlock()))
     return invalid<ReportEntry>(Context, /*Assert=*/true, CurRegion.getEntry());
 
-  int NumLoops = countBeneficialLoops(&CurRegion);
-  if (!PollyProcessUnprofitable && NumLoops < 2)
-    invalid<ReportUnprofitable>(Context, /*Assert=*/true, &CurRegion);
-
   if (!allBlocksValid(Context))
     return false;
 
-  // We can probably not do a lot on scops that only write or only read
-  // data.
-  if (!PollyProcessUnprofitable && (!Context.hasStores || !Context.hasLoads))
-    invalid<ReportUnprofitable>(Context, /*Assert=*/true, &CurRegion);
+  DebugLoc DbgLoc;
+  if (!isReducibleRegion(CurRegion, DbgLoc))
+    return invalid<ReportIrreducibleRegion>(Context, /*Assert=*/true,
+                                            &CurRegion, DbgLoc);
 
-  // Check if there are sufficent non-overapproximated loops.
-  int NumAffineLoops = NumLoops - Context.BoxedLoopsSet.size();
-  if (!PollyProcessUnprofitable && NumAffineLoops < 2)
-    invalid<ReportUnprofitable>(Context, /*Assert=*/true, &CurRegion);
+  if (!isProfitableRegion(Context))
+    return false;
 
   DEBUG(dbgs() << "OK\n");
   return true;
@@ -1222,6 +1266,73 @@ void ScopDetection::emitMissedRemarksForLeaves(const Function &F,
       }
     }
   }
+}
+
+bool ScopDetection::isReducibleRegion(Region &R, DebugLoc &DbgLoc) const {
+  BasicBlock *REntry = R.getEntry();
+  BasicBlock *RExit = R.getExit();
+  // Map to match the color of a BasicBlock during the DFS walk.
+  DenseMap<const BasicBlock *, Color> BBColorMap;
+  // Stack keeping track of current BB and index of next child to be processed.
+  std::stack<std::pair<BasicBlock *, unsigned>> DFSStack;
+
+  unsigned AdjacentBlockIndex = 0;
+  BasicBlock *CurrBB, *SuccBB;
+  CurrBB = REntry;
+
+  // Initialize the map for all BB with WHITE color.
+  for (auto *BB : R.blocks())
+    BBColorMap[BB] = ScopDetection::WHITE;
+
+  // Process the entry block of the Region.
+  BBColorMap[CurrBB] = ScopDetection::GREY;
+  DFSStack.push(std::make_pair(CurrBB, 0));
+
+  while (!DFSStack.empty()) {
+    // Get next BB on stack to be processed.
+    CurrBB = DFSStack.top().first;
+    AdjacentBlockIndex = DFSStack.top().second;
+    DFSStack.pop();
+
+    // Loop to iterate over the successors of current BB.
+    const TerminatorInst *TInst = CurrBB->getTerminator();
+    unsigned NSucc = TInst->getNumSuccessors();
+    for (unsigned I = AdjacentBlockIndex; I < NSucc;
+         ++I, ++AdjacentBlockIndex) {
+      SuccBB = TInst->getSuccessor(I);
+
+      // Checks for region exit block and self-loops in BB.
+      if (SuccBB == RExit || SuccBB == CurrBB)
+        continue;
+
+      // WHITE indicates an unvisited BB in DFS walk.
+      if (BBColorMap[SuccBB] == ScopDetection::WHITE) {
+        // Push the current BB and the index of the next child to be visited.
+        DFSStack.push(std::make_pair(CurrBB, I + 1));
+        // Push the next BB to be processed.
+        DFSStack.push(std::make_pair(SuccBB, 0));
+        // First time the BB is being processed.
+        BBColorMap[SuccBB] = ScopDetection::GREY;
+        break;
+      } else if (BBColorMap[SuccBB] == ScopDetection::GREY) {
+        // GREY indicates a loop in the control flow.
+        // If the destination dominates the source, it is a natural loop
+        // else, an irreducible control flow in the region is detected.
+        if (!DT->dominates(SuccBB, CurrBB)) {
+          // Get debug info of instruction which causes irregular control flow.
+          DbgLoc = TInst->getDebugLoc();
+          return false;
+        }
+      }
+    }
+
+    // If all children of current BB have been processed,
+    // then mark that BB as fully processed.
+    if (AdjacentBlockIndex == NSucc)
+      BBColorMap[CurrBB] = ScopDetection::BLACK;
+  }
+
+  return true;
 }
 
 bool ScopDetection::runOnFunction(llvm::Function &F) {

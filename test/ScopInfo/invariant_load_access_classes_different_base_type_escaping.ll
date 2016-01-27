@@ -18,26 +18,24 @@
 ;      return x + y;
 ;    }
 ;
-; CHECK:   Invariant Accesses: {
-; CHECK:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
-; CHECK:                { Stmt_do_body[i0] -> MemRef_S[0] };
-; CHECK:            Execution Context: {  :  }
-; CHECK:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
-; CHECK:                { Stmt_do_body[i0] -> MemRef_S[1] };
-; CHECK:            Execution Context: {  :  }
-; CHECK:    }
+; CHECK:      Invariant Accesses: {
+; CHECK-NEXT:         ReadAccess :=    [Reduction Type: NONE] [Scalar: 0]
+; CHECK-NEXT:             { Stmt_do_body[i0] -> MemRef_S[0] };
+; CHECK-NEXT:         Execution Context: {  :  }
+; CHECK-NEXT:         ReadAccess :=    [Reduction Type: NONE] [Scalar: 0]
+; CHECK-NEXT:             { Stmt_do_body[i0] -> MemRef_S[1] };
+; CHECK-NEXT:         Execution Context: {  :  }
+; CHECK-NEXT: }
 ;
-; CHECK:    Statements {
-; CHECK-NOT: Access
-; CHECK:      Stmt_do_body
-; CHECK:            Domain :=
-; CHECK:                { Stmt_do_body[i0] : i0 <= 1000 and i0 >= 0 };
-; CHECK:            Schedule :=
-; CHECK:                { Stmt_do_body[i0] -> [i0] };
-; CHECK:            MustWriteAccess :=  [Reduction Type: NONE] [Scalar: 0]
-; CHECK:                { Stmt_do_body[i0] -> MemRef_A[i0] };
-; CHECK-NOT: Access
-; CHECK:    }
+; CHECK:      Statements {
+; CHECK-NEXT:     Stmt_do_body
+; CHECK-NEXT:         Domain :=
+; CHECK-NEXT:             { Stmt_do_body[i0] : 0 <= i0 <= 1000 };
+; CHECK-NEXT:         Schedule :=
+; CHECK-NEXT:             { Stmt_do_body[i0] -> [i0] };
+; CHECK-NEXT:         MustWriteAccess :=    [Reduction Type: NONE] [Scalar: 0]
+; CHECK-NEXT:             { Stmt_do_body[i0] -> MemRef_A[i0] };
+; CHECK-NEXT: }
 ;
 ; CODEGEN: entry:
 ; CODEGEN:   %S.b.preload.s2a = alloca float
@@ -50,8 +48,8 @@
 ; CODEGEN:   store float %.load12, float* %S.b.preload.s2a
 ;
 ; CODEGEN:     polly.merge_new_and_old:
-; CODEGEN-DAG:   %S.b.merge = phi float [ %S.b.final_reload, %polly.loop_exit ], [ %S.b, %do.cond ]
-; CODEGEN-DAG:   %S.a.merge = phi i32 [ %S.a.final_reload, %polly.loop_exit ], [ %S.a, %do.cond ]
+; CODEGEN-DAG:   %S.b.merge = phi float [ %S.b.final_reload, %polly.exiting ], [ %S.b, %do.cond ]
+; CODEGEN-DAG:   %S.a.merge = phi i32 [ %S.a.final_reload, %polly.exiting ], [ %S.a, %do.cond ]
 ;
 ; CODEGEN: do.end:
 ; CODEGEN:   %conv3 = sitofp i32 %S.a.merge to float

@@ -52,6 +52,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AliasSetTracker.h"
+#include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Pass.h"
 #include <map>
 #include <memory>
@@ -60,8 +61,6 @@
 using namespace llvm;
 
 namespace llvm {
-class RegionInfo;
-class Region;
 class LoopInfo;
 class Loop;
 class ScalarEvolution;
@@ -199,6 +198,13 @@ private:
   AliasAnalysis *AA;
   //@}
 
+  /// @brief Enum for coloring BBs in Region.
+  ///
+  /// WHITE - Unvisited BB in DFS walk.
+  /// GREY - BBs which are currently on the DFS stack for processing.
+  /// BLACK - Visited and completely processed BB.
+  enum Color { WHITE, GREY, BLACK };
+
   /// @brief Map to remember detection contexts for valid regions.
   using DetectionContextMapTy = DenseMap<const Region *, DetectionContext>;
   mutable DetectionContextMapTy DetectionContextMap;
@@ -287,6 +293,30 @@ private:
   /// @return True if all blocks in R are valid, false otherwise.
   bool allBlocksValid(DetectionContext &Context) const;
 
+  /// @brief Check if a region has sufficient compute instructions
+  ///
+  /// This function checks if a region has a non-trivial number of instructions
+  /// in each loop. This can be used as an indicator if a loop is worth
+  /// optimising.
+  ///
+  /// @param Context  The context of scop detection.
+  /// @param NumLoops The number of loops in the region.
+  ///
+  /// @return True if region is has sufficient compute instructions,
+  ///         false otherwise.
+  bool hasSufficientCompute(DetectionContext &Context,
+                            int NumAffineLoops) const;
+
+  /// @brief Check if a region is profitable to optimize.
+  ///
+  /// Regions that are unlikely to expose interesting optimization opportunities
+  /// are called 'unprofitable' and may be skipped during scop detection.
+  ///
+  /// @param Context The context of scop detection.
+  ///
+  /// @return True if region is profitable to optimize, false otherwise.
+  bool isProfitableRegion(DetectionContext &Context) const;
+
   /// @brief Check if a region is a Scop.
   ///
   /// @param Context The context of scop detection.
@@ -327,7 +357,7 @@ private:
   /// @param Context The context of scop detection.
   ///
   /// @return True if the memory access is valid, false otherwise.
-  bool isValidMemoryAccess(Instruction &Inst, DetectionContext &Context) const;
+  bool isValidMemoryAccess(MemAccInst Inst, DetectionContext &Context) const;
 
   /// @brief Check if an instruction has any non trivial scalar dependencies
   ///        as part of a Scop.
@@ -428,6 +458,15 @@ private:
 
   /// @brief Print the locations of all detected scops.
   void printLocations(llvm::Function &F);
+
+  /// @brief Check if a region is reducible or not.
+  ///
+  /// @param Region The region to check.
+  /// @param DbgLoc Parameter to save the location of instruction that
+  ///               causes irregular control flow if the region is irreducible.
+  ///
+  /// @return True if R is reducible, false otherwise.
+  bool isReducibleRegion(Region &R, DebugLoc &DbgLoc) const;
 
   /// @brief Track diagnostics for invalid scops.
   ///

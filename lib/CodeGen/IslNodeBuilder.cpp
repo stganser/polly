@@ -219,7 +219,7 @@ static isl_stat addReferencesFromStmt(const ScopStmt *Stmt, void *UserPtr) {
   }
 
   for (auto &Access : *Stmt) {
-    if (Access->isExplicit()) {
+    if (Access->isArrayKind()) {
       auto *BasePtr = Access->getScopArrayInfo()->getBasePtr();
       if (Instruction *OpInst = dyn_cast<Instruction>(BasePtr))
         if (Stmt->getParent()->getRegion().contains(OpInst))
@@ -839,7 +839,8 @@ bool IslNodeBuilder::materializeValue(isl_id *Id) {
           // the parent of Inst and lastly if the parent of Inst has an empty
           // domain. In the first and last case the instruction is dead but if
           // there is a statement or the domain is not empty Inst is not dead.
-          auto *Address = getPointerOperand(*Inst);
+          auto MemInst = MemAccInst::dyn_cast(Inst);
+          auto Address = MemInst ? MemInst.getPointerOperand() : nullptr;
           if (Address &&
               SE.getUnknown(UndefValue::get(Address->getType())) ==
                   SE.getPointerBase(SE.getSCEV(Address))) {
@@ -893,15 +894,20 @@ bool IslNodeBuilder::materializeParameters(isl_set *Set, bool All) {
 }
 
 Value *IslNodeBuilder::preloadUnconditionally(isl_set *AccessRange,
-                                              isl_ast_build *Build, Type *Ty) {
+                                              isl_ast_build *Build,
+                                              Instruction *AccInst) {
   isl_pw_multi_aff *PWAccRel = isl_pw_multi_aff_from_set(AccessRange);
   PWAccRel = isl_pw_multi_aff_gist_params(PWAccRel, S.getContext());
   isl_ast_expr *Access =
       isl_ast_build_access_from_pw_multi_aff(Build, PWAccRel);
   Value *PreloadVal = ExprBuilder.create(Access);
 
+  if (LoadInst *PreloadInst = dyn_cast<LoadInst>(PreloadVal))
+    PreloadInst->setAlignment(dyn_cast<LoadInst>(AccInst)->getAlignment());
+
   // Correct the type as the SAI might have a different type than the user
   // expects, especially if the base pointer is a struct.
+  Type *Ty = AccInst->getType();
   if (Ty == PreloadVal->getType())
     return PreloadVal;
 
@@ -916,6 +922,9 @@ Value *IslNodeBuilder::preloadUnconditionally(isl_set *AccessRange,
   Ptr = Builder.CreatePointerCast(Ptr, Ty->getPointerTo(),
                                   Ptr->getName() + ".cast");
   PreloadVal = Builder.CreateLoad(Ptr, LInst->getName());
+  if (LoadInst *PreloadInst = dyn_cast<LoadInst>(PreloadVal))
+    PreloadInst->setAlignment(dyn_cast<LoadInst>(AccInst)->getAlignment());
+
   LInst->eraseFromParent();
   return PreloadVal;
 }
@@ -940,7 +949,7 @@ Value *IslNodeBuilder::preloadInvariantLoad(const MemoryAccess &MA,
 
   Value *PreloadVal = nullptr;
   if (AlwaysExecuted) {
-    PreloadVal = preloadUnconditionally(AccessRange, Build, AccInstTy);
+    PreloadVal = preloadUnconditionally(AccessRange, Build, AccInst);
     isl_ast_build_free(Build);
     isl_set_free(Domain);
     return PreloadVal;
@@ -984,8 +993,7 @@ Value *IslNodeBuilder::preloadInvariantLoad(const MemoryAccess &MA,
   Builder.CreateBr(MergeBB);
 
   Builder.SetInsertPoint(ExecBB->getTerminator());
-  Value *PreAccInst = preloadUnconditionally(AccessRange, Build, AccInstTy);
-
+  Value *PreAccInst = preloadUnconditionally(AccessRange, Build, AccInst);
   Builder.SetInsertPoint(MergeBB->getTerminator());
   auto *MergePHI = Builder.CreatePHI(
       AccInstTy, 2, "polly.preload." + AccInst->getName() + ".merge");
@@ -1008,7 +1016,7 @@ bool IslNodeBuilder::preloadInvariantEquivClass(
     return true;
 
   MemoryAccess *MA = MAs.front();
-  assert(MA->isExplicit() && MA->isRead());
+  assert(MA->isArrayKind() && MA->isRead());
 
   // If the access function was already mapped, the preload of this equivalence
   // class was triggered earlier already and doesn't need to be done again.
@@ -1023,7 +1031,7 @@ bool IslNodeBuilder::preloadInvariantEquivClass(
 
   // If the base pointer of this class is dependent on another one we have to
   // make sure it was preloaded already.
-  auto *SAI = S.getScopArrayInfo(MA->getBaseAddr(), ScopArrayInfo::KIND_ARRAY);
+  auto *SAI = S.getScopArrayInfo(MA->getBaseAddr(), ScopArrayInfo::MK_Array);
   if (const auto *BaseIAClass = S.lookupInvariantEquivClass(SAI->getBasePtr()))
     if (!preloadInvariantEquivClass(*BaseIAClass))
       return false;
@@ -1075,7 +1083,7 @@ bool IslNodeBuilder::preloadInvariantEquivClass(
 
       // For scalar derived SAIs we remap the alloca used for the derived value.
       if (BasePtr == MA->getAccessInstruction()) {
-        if (DerivedSAI->isPHI())
+        if (DerivedSAI->isPHIKind())
           PHIOpMap[BasePtr] = Alloca;
         else
           ScalarMap[BasePtr] = Alloca;

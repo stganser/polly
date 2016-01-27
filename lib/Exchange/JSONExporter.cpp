@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "polly/LinkAllPasses.h"
 #include "polly/DependenceInfo.h"
+#include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/ScopPass.h"
@@ -216,8 +216,7 @@ bool JSONImporter::runOnScop(Scop &S) {
   std::error_code ec = result.getError();
 
   if (ec) {
-    std::string errMsg = "File could not be read: " + ec.message();
-    errs() << errMsg << '\n';
+    errs() << "File could not be read: " << ec.message() << "\n";
     report_fatal_error(errMsg, false);
   }
 
@@ -227,8 +226,7 @@ bool JSONImporter::runOnScop(Scop &S) {
   bool parsingSuccessful = reader.parse(result.get()->getBufferStart(), jscop);
 
   if (!parsingSuccessful) {
-    std::string errMsg = "JSCoP file could not be parsed";
-    errs() << errMsg << '\n';
+    errs() << "JSCoP file could not be parsed\n";
     report_fatal_error(errMsg, false);
   }
 
@@ -267,10 +265,8 @@ bool JSONImporter::runOnScop(Scop &S) {
   }
 
   if (!D.isValidSchedule(S, &NewSchedule)) {
-    std::string errMsg = "JScop file contains a schedule that changes the "
-                         "dependences. Use -disable-polly-legality to continue "
-                         "anyways";
-    errs() << errMsg << '\n';
+    errs() << "JScop file contains a schedule that changes the "
+           << "dependences. Use -disable-polly-legality to continue anyways\n";
     for (StatementToIslMapTy::iterator SI = NewSchedule.begin(),
                                        SE = NewSchedule.end();
          SI != SE; ++SI)
@@ -300,9 +296,7 @@ bool JSONImporter::runOnScop(Scop &S) {
 
       if (isl_map_dim(newAccessMap, isl_dim_param) !=
           isl_map_dim(currentAccessMap, isl_dim_param)) {
-        std::string errMsg = "JScop file changes the number of parameter "
-                             "dimensions";
-        errs() << errMsg << '\n';
+        errs() << "JScop file changes the number of parameter dimensions\n";
         isl_map_free(currentAccessMap);
         isl_map_free(newAccessMap);
         report_fatal_error(errMsg, false);
@@ -311,34 +305,35 @@ bool JSONImporter::runOnScop(Scop &S) {
       isl_id *OutId = isl_map_get_tuple_id(currentAccessMap, isl_dim_out);
       newAccessMap = isl_map_set_tuple_id(newAccessMap, isl_dim_out, OutId);
 
-      // We keep the old alignment, thus we cannot allow accesses to memory
-      // locations that were not accessed before if the alignment of the access
-      // is not the default alignment.
-      bool SpecialAlignment = true;
-      if (LoadInst *LoadI = dyn_cast<LoadInst>(MA->getAccessInstruction())) {
-        SpecialAlignment =
-            DL.getABITypeAlignment(LoadI->getType()) != LoadI->getAlignment();
-      } else if (StoreInst *StoreI =
-                     dyn_cast<StoreInst>(MA->getAccessInstruction())) {
-        SpecialAlignment =
-            DL.getABITypeAlignment(StoreI->getValueOperand()->getType()) !=
-            StoreI->getAlignment();
-      }
+      if (MA->isArrayKind()) {
+        // We keep the old alignment, thus we cannot allow accesses to memory
+        // locations that were not accessed before if the alignment of the
+        // access is not the default alignment.
+        bool SpecialAlignment = true;
+        if (LoadInst *LoadI = dyn_cast<LoadInst>(MA->getAccessInstruction())) {
+          SpecialAlignment =
+              DL.getABITypeAlignment(LoadI->getType()) != LoadI->getAlignment();
+        } else if (StoreInst *StoreI =
+                       dyn_cast<StoreInst>(MA->getAccessInstruction())) {
+          SpecialAlignment =
+              DL.getABITypeAlignment(StoreI->getValueOperand()->getType()) !=
+              StoreI->getAlignment();
+        }
 
-      if (SpecialAlignment) {
-        isl_set *newAccessSet = isl_map_range(isl_map_copy(newAccessMap));
-        isl_set *currentAccessSet =
-            isl_map_range(isl_map_copy(currentAccessMap));
-        bool isSubset = isl_set_is_subset(newAccessSet, currentAccessSet);
-        isl_set_free(newAccessSet);
-        isl_set_free(currentAccessSet);
+        if (SpecialAlignment) {
+          isl_set *newAccessSet = isl_map_range(isl_map_copy(newAccessMap));
+          isl_set *currentAccessSet =
+              isl_map_range(isl_map_copy(currentAccessMap));
+          bool isSubset = isl_set_is_subset(newAccessSet, currentAccessSet);
+          isl_set_free(newAccessSet);
+          isl_set_free(currentAccessSet);
 
-        if (!isSubset) {
-          std::string errMsg = "JScop file changes the accessed memory";
-          errs() << errMsg << '\n';
-          isl_map_free(currentAccessMap);
-          isl_map_free(newAccessMap);
-          report_fatal_error(errMsg, false);
+          if (!isSubset) {
+            errs() << "JScop file changes the accessed memory\n";
+            isl_map_free(currentAccessMap);
+            isl_map_free(newAccessMap);
+            report_fatal_error(errMsg, false);
+          }
         }
       }
 
@@ -357,9 +352,8 @@ bool JSONImporter::runOnScop(Scop &S) {
       newAccessMap = isl_map_set_tuple_id(newAccessMap, isl_dim_in, Id);
 
       if (!isl_map_has_equal_space(currentAccessMap, newAccessMap)) {
-        std::string errMsg = "JScop file contains access function with incompatible "
-                "dimensions";
-        errs() << errMsg << '\n';
+        errs() << "JScop file contains access function with incompatible "
+               << "dimensions\n";
         isl_map_free(currentAccessMap);
         isl_map_free(newAccessMap);
         report_fatal_error(errMsg, false);
@@ -375,9 +369,7 @@ bool JSONImporter::runOnScop(Scop &S) {
 
       if (isl_set_is_subset(CurrentAccessDomain, NewAccessDomain) ==
           isl_bool_false) {
-        std::string errMsg = "Mapping not defined for all iteration domain "
-                             "elements";
-        errs() << errMsg << '\n';
+        errs() << "Mapping not defined for all iteration domain elements\n";
         isl_set_free(CurrentAccessDomain);
         isl_set_free(NewAccessDomain);
         isl_map_free(currentAccessMap);

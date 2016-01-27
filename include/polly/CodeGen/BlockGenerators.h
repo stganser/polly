@@ -483,9 +483,8 @@ protected:
   /// @param NewAccesses A map from memory access ids to new ast expressions,
   ///                    which may contain new access expressions for certain
   ///                    memory accesses.
-  Value *generateLocationAccessed(ScopStmt &Stmt, const Instruction *Inst,
-                                  Value *Pointer, ValueMapT &BBMap,
-                                  LoopToScevMapT &LTS,
+  Value *generateLocationAccessed(ScopStmt &Stmt, MemAccInst Inst,
+                                  ValueMapT &BBMap, LoopToScevMapT &LTS,
                                   isl_id_to_ast_expr *NewAccesses);
 
   /// @param NewAccesses A map from memory access ids to new ast expressions,
@@ -535,21 +534,10 @@ protected:
   void copyInstruction(ScopStmt &Stmt, Instruction *Inst, ValueMapT &BBMap,
                        LoopToScevMapT &LTS, isl_id_to_ast_expr *NewAccesses);
 
-  /// @brief Helper to get the newest version of @p ScalarValue.
+  /// @brief Helper to determine if @p Inst can be synthezised in @p Stmt.
   ///
-  /// @param ScalarValue The original value needed.
-  /// @param R           The current SCoP region.
-  /// @param Stmt        The ScopStmt in which we look up this value.
-  /// @param LTS         A mapping from loops virtual canonical induction
-  ///                    variable to their new values
-  ///                    (for values recalculated in the new ScoP, but not
-  ///                     within this basic block)
-  /// @param BBMap       A mapping from old values to their new values
-  ///                    (for values recalculated within this basic block).
-  ///
-  /// @returns The newest version (e.g., reloaded) of the scalar value.
-  Value *getNewScalarValue(Value *ScalarValue, const Region &R, ScopStmt &,
-                           LoopToScevMapT &LTS, ValueMapT &BBMap);
+  /// @returns false, iff @p Inst can be synthesized in @p Stmt.
+  bool canSyntheziseInStmt(ScopStmt &Stmt, Instruction *Inst);
 };
 
 /// @brief Generate a new vector basic block for a polyhedral statement.
@@ -709,6 +697,18 @@ private:
 
   bool hasVectorOperands(const Instruction *Inst, ValueMapT &VectorMap);
 
+  /// @brief Generate vector loads for scalars.
+  ///
+  /// @param Stmt           The scop statement for which to generate the loads.
+  /// @param VectorBlockMap A map that will be updated to relate the original
+  ///                       values with the newly generated vector loads.
+  void generateScalarVectorLoads(ScopStmt &Stmt, ValueMapT &VectorBlockMap);
+
+  /// @brief Verify absence of scalar stores.
+  ///
+  /// @param Stmt The scop statement to check for scalar stores.
+  void verifyNoScalarStores(ScopStmt &Stmt);
+
   /// @param NewAccesses A map from memory access ids to new ast expressions,
   ///                    which may contain new access expressions for certain
   ///                    memory accesses.
@@ -769,6 +769,39 @@ private:
   /// SCEVs.
   void addOperandToPHI(ScopStmt &Stmt, const PHINode *PHI, PHINode *PHICopy,
                        BasicBlock *IncomingBB, LoopToScevMapT &LTS);
+
+  /// @brief Create a PHI that combines the incoming values from all incoming
+  ///        blocks that are in the subregion.
+  ///
+  /// PHIs in the subregion's exit block can have incoming edges from within and
+  /// outside the subregion. This function combines the incoming values from
+  /// within the subregion to appear as if there is only one incoming edge from
+  /// the subregion (an additional exit block is created by RegionGenerator).
+  /// This is to avoid that a value is written to the .phiops location without
+  /// leaving the subregion because the exiting block as an edge back into the
+  /// subregion.
+  ///
+  /// @param MA    The WRITE of MK_PHI/MK_ExitPHI for a PHI in the subregion's
+  ///              exit block.
+  /// @param LTS   Virtual induction variable mapping.
+  /// @param BBMap A mapping from old values to their new values in this block.
+  /// @param L     Loop surrounding this region statement.
+  ///
+  /// @returns The constructed PHI node.
+  PHINode *buildExitPHI(MemoryAccess *MA, LoopToScevMapT &LTS, ValueMapT &BBMap,
+                        Loop *L);
+
+  /// @param Return the new value of a scalar write, creating a PHINode if
+  ///        necessary.
+  ///
+  /// @param MA    A scalar WRITE MemoryAccess.
+  /// @param LTS   Virtual induction variable mapping.
+  /// @param BBMap A mapping from old values to their new values in this block.
+  ///
+  /// @returns The effective value of @p MA's written value when leaving the
+  ///          subregion.
+  /// @see buildExitPHI
+  Value *getExitScalar(MemoryAccess *MA, LoopToScevMapT &LTS, ValueMapT &BBMap);
 
   /// @brief Generate the scalar stores for the given statement.
   ///
