@@ -433,13 +433,6 @@ __isl_give isl_schedule *rebuildSchedule(__isl_take isl_schedule *sched,
   isl_union_set *domain = S.getDomains();
   isl_schedule *result = rebuildSchedule(isl_schedule_get_root(sched), S,
                                          domain);
-  isl_printer *pr = isl_printer_to_str(S.getIslCtx());
-  pr = isl_printer_print_schedule(pr, sched);
-  errs() << "Original schedule: " << isl_printer_get_str(pr) << '\n';
-  pr = isl_printer_flush(pr);
-  pr = isl_printer_print_schedule(pr, result);
-  errs() << "Rebuilt schedule: " << isl_printer_get_str(pr) << '\n';
-  isl_printer_free(pr);
   isl_schedule_free(sched);
   isl_union_set_free(domain);
   return result;
