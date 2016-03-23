@@ -402,6 +402,17 @@ __isl_give isl_schedule *rebuildSchedule(__isl_take isl_schedule_node *n,
       break;
     }
 
+    case isl_schedule_node_type::isl_schedule_node_set : {
+      isl_schedule_node *fstChild = isl_schedule_node_get_child(n, 0);
+      result = rebuildSchedule(fstChild, S, domain);
+      for (int i = 1; i < isl_schedule_node_n_children(n); ++i) {
+        isl_schedule *childSched = rebuildSchedule(
+              isl_schedule_node_get_child(n, i), S, domain);
+        result = isl_schedule_set(result, childSched);
+      }
+      break;
+    }
+
     case isl_schedule_node_type::isl_schedule_node_leaf : {
       result = isl_schedule_from_domain(isl_union_set_copy(domain));
       break;
