@@ -288,7 +288,7 @@ ScopStmt& getStmtForName(const char *name, Scop &S) {
 
 __isl_give isl_union_map *replaceIdsInUnionMap(__isl_take isl_union_map *m,
                                                Scop &S) {
-  isl_union_map *result = nullptr;
+  isl_union_map *result = isl_union_map_empty(S.getParamSpace());
   std::function<void(isl_map *)> lambda = [&result, &S](isl_map *m) {
     const char* tupleName = isl_map_get_tuple_name(m, isl_dim_in);
     ScopStmt &sttmt = getStmtForName(tupleName, S);
@@ -300,11 +300,7 @@ __isl_give isl_union_map *replaceIdsInUnionMap(__isl_take isl_union_map *m,
       newMap = isl_map_set_dim_id(newMap, isl_dim_param, i, id);
     }
     isl_space_free(stmtSpace);
-
-    if (!result)
-      result = isl_union_map_from_map(newMap);
-    else
-      result = isl_union_map_add_map(result, newMap);
+    result = isl_union_map_add_map(result, newMap);
   };
   callLambda(m, lambda);
   isl_union_map_free(m);
