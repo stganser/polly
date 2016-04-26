@@ -98,6 +98,48 @@ struct JSONImporter : public ScopPass {
 
   /// @brief Register all analyses and transformation required.
   void getAnalysisUsage(AnalysisUsage &AU) const override;
+
+  static __isl_give isl_set *getDomainForStmtId(const char *stmtId, Scop &S);
+
+  static isl_stat foreachSetHelper(isl_set *s, void *user);
+
+  static void callLambda(__isl_keep isl_union_set *s,
+                         std::function<void(isl_set*)> &f);
+
+  static isl_stat foreachMapHelper(isl_map *m, void *user);
+
+  static void callLambda(__isl_keep isl_union_map *m,
+                         std::function<void(isl_map*)> &f);
+
+  static __isl_give isl_schedule_node *scheduleMapHelper(isl_schedule_node *n,
+                                                         void *user);
+
+  static __isl_give isl_schedule *callLambda(__isl_take isl_schedule *s,
+                  std :: function<isl_schedule_node*(isl_schedule_node*)> &f);
+
+  static DenseSet<const char *> getTupleNamesFromUnionSet(
+      __isl_keep isl_union_set *s);
+
+  static __isl_give isl_union_set *buildDomainForSttmnts(
+      DenseSet<const char*> &stmtNames, Scop &S);
+
+  static ScopStmt& getStmtForName(const char *name, Scop &S);
+
+  static __isl_give isl_union_map *replaceIdsInUnionMap(
+      __isl_take isl_union_map *m, Scop &S);
+
+  static __isl_give isl_schedule *setCoincidence(
+      __isl_take isl_schedule *sched, __isl_keep isl_schedule_node *oldNode);
+
+  static __isl_give isl_schedule *setPermutability(
+      __isl_take isl_schedule *sched, __isl_keep isl_schedule_node *oldNode);
+
+  static __isl_give isl_schedule *rebuildSchedule(
+      __isl_take isl_schedule_node *n, Scop &S,
+      __isl_keep isl_union_set *domain);
+
+  static __isl_give isl_schedule *rebuildSchedule(
+      __isl_take isl_schedule *sched, Scop &S);
 };
 }
 
@@ -211,7 +253,8 @@ void JSONImporter::printScop(raw_ostream &OS, Scop &S) const {
 
 typedef Dependences::StatementToIslMapTy StatementToIslMapTy;
 
-__isl_give isl_set *getDomainForStmtId(const char *stmtId, Scop &S) {
+__isl_give isl_set *JSONImporter::getDomainForStmtId(const char *stmtId,
+                                                     Scop &S) {
   for (ScopStmt &stmt : S) {
     if (!std::strcmp(stmt.getBaseName(), stmtId)) {
       return stmt.getDomain();
@@ -220,38 +263,42 @@ __isl_give isl_set *getDomainForStmtId(const char *stmtId, Scop &S) {
   return nullptr;
 }
 
-isl_stat foreachSetHelper(isl_set *s, void *user) {
+isl_stat JSONImporter::foreachSetHelper(isl_set *s, void *user) {
   std::function<void(isl_set*)> *f = (std::function<void(isl_set*)> *) user;
   (*f)(s);
   return isl_stat_ok;
 }
 
-void callLambda(__isl_keep isl_union_set *s, std::function<void(isl_set*)> &f) {
+void JSONImporter::callLambda(__isl_keep isl_union_set *s,
+                              std::function<void(isl_set*)> &f) {
   isl_union_set_foreach_set(s, foreachSetHelper, &f);
 }
 
-isl_stat foreachMapHelper(isl_map *m, void *user) {
+isl_stat JSONImporter::foreachMapHelper(isl_map *m, void *user) {
   std::function<void(isl_map*)> *f = (std::function<void(isl_map*)> *) user;
   (*f)(m);
   return isl_stat_ok;
 }
 
-void callLambda(__isl_keep isl_union_map *m, std::function<void(isl_map*)> &f) {
+void JSONImporter::callLambda(__isl_keep isl_union_map *m,
+                              std::function<void(isl_map*)> &f) {
   isl_union_map_foreach_map(m, foreachMapHelper, &f);
 }
 
-__isl_give isl_schedule_node *scheduleMapHelper(isl_schedule_node *n, void *user) {
+__isl_give isl_schedule_node *JSONImporter::scheduleMapHelper(
+    isl_schedule_node *n, void *user) {
   std::function<isl_schedule_node*(isl_schedule_node*)> *f
       = (std::function<isl_schedule_node*(isl_schedule_node*)> *) user;
   return (*f)(n);
 }
 
-__isl_give isl_schedule *callLambda(__isl_take isl_schedule *s,
+__isl_give isl_schedule *JSONImporter::callLambda(__isl_take isl_schedule *s,
                 std :: function<isl_schedule_node*(isl_schedule_node*)> &f) {
   return isl_schedule_map_schedule_node_bottom_up(s, scheduleMapHelper, &f);
 }
 
-DenseSet<const char *> getTupleNamesFromUnionSet(__isl_keep isl_union_set *s) {
+DenseSet<const char *> JSONImporter::getTupleNamesFromUnionSet(
+    __isl_keep isl_union_set *s) {
   DenseSet<const char *> names;
   std::function<void(isl_set *)> lambda = [&names](isl_set *s) {
     names.insert(isl_set_get_tuple_name(s));
@@ -261,7 +308,7 @@ DenseSet<const char *> getTupleNamesFromUnionSet(__isl_keep isl_union_set *s) {
   return names;
 }
 
-__isl_give isl_union_set *buildDomainForSttmnts(
+__isl_give isl_union_set *JSONImporter::buildDomainForSttmnts(
     DenseSet<const char*> &stmtNames, Scop &S) {
   isl_union_set *domain = S.getDomains();
   isl_union_set *result
@@ -277,7 +324,7 @@ __isl_give isl_union_set *buildDomainForSttmnts(
   return result;
 }
 
-ScopStmt& getStmtForName(const char *name, Scop &S) {
+ScopStmt& JSONImporter::getStmtForName(const char *name, Scop &S) {
   for (ScopStmt &Stmt : S) {
     if (!std::strcmp(name, Stmt.getBaseName())) {
       return Stmt;
@@ -286,8 +333,8 @@ ScopStmt& getStmtForName(const char *name, Scop &S) {
   report_fatal_error("Wat?", true);
 }
 
-__isl_give isl_union_map *replaceIdsInUnionMap(__isl_take isl_union_map *m,
-                                               Scop &S) {
+__isl_give isl_union_map *JSONImporter::replaceIdsInUnionMap(
+    __isl_take isl_union_map *m, Scop &S) {
   isl_union_map *result = isl_union_map_empty(S.getParamSpace());
   std::function<void(isl_map *)> lambda = [&result, &S](isl_map *m) {
     const char* tupleName = isl_map_get_tuple_name(m, isl_dim_in);
@@ -307,8 +354,8 @@ __isl_give isl_union_map *replaceIdsInUnionMap(__isl_take isl_union_map *m,
   return result;
 }
 
-__isl_give isl_schedule *setCoincidence(__isl_take isl_schedule *sched,
-                                        __isl_keep isl_schedule_node *oldNode) {
+__isl_give isl_schedule *JSONImporter::setCoincidence(
+    __isl_take isl_schedule *sched, __isl_keep isl_schedule_node *oldNode) {
   isl_schedule_node *root = isl_schedule_get_root(sched);
   std::function<isl_schedule_node*(isl_schedule_node*)> lambda
       = [&root, &oldNode](isl_schedule_node *n) {
@@ -333,8 +380,8 @@ __isl_give isl_schedule *setCoincidence(__isl_take isl_schedule *sched,
   return result;
 }
 
-__isl_give isl_schedule *setPermutability(__isl_take isl_schedule *sched,
-                                      __isl_keep isl_schedule_node *oldNode) {
+__isl_give isl_schedule *JSONImporter::setPermutability(
+    __isl_take isl_schedule *sched, __isl_keep isl_schedule_node *oldNode) {
   isl_schedule_node *root = isl_schedule_get_root(sched);
   std::function<isl_schedule_node*(isl_schedule_node*)> lambda
       = [&root, &oldNode](isl_schedule_node *n) {
@@ -356,8 +403,9 @@ __isl_give isl_schedule *setPermutability(__isl_take isl_schedule *sched,
   return result;
 }
 
-__isl_give isl_schedule *rebuildSchedule(__isl_take isl_schedule_node *n,
-                                  Scop &S, __isl_keep isl_union_set *domain) {
+__isl_give isl_schedule *JSONImporter::rebuildSchedule(
+    __isl_take isl_schedule_node *n, Scop &S,
+    __isl_keep isl_union_set *domain) {
 
   isl_schedule *result = nullptr;
 
@@ -428,8 +476,8 @@ __isl_give isl_schedule *rebuildSchedule(__isl_take isl_schedule_node *n,
   return result;
 }
 
-__isl_give isl_schedule *rebuildSchedule(__isl_take isl_schedule *sched,
-                                         Scop &S) {
+__isl_give isl_schedule *JSONImporter::rebuildSchedule(
+    __isl_take isl_schedule *sched, Scop &S) {
   isl_union_set *domain = S.getDomains();
   isl_schedule *result = rebuildSchedule(isl_schedule_get_root(sched), S,
                                          domain);
