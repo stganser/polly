@@ -25,6 +25,7 @@
 
 #include "polly/ScopPass.h"
 #include "isl/ctx.h"
+#include <isl/space.h>
 
 struct isl_pw_aff;
 struct isl_union_map;
@@ -159,6 +160,13 @@ private:
   ///
   /// The dependences struct will again be "empty" afterwards.
   void releaseMemory();
+
+  /// @brief Display dependences that are violated by a given schedule to the
+  /// user.
+  void printWitnessesForUnsatisfiedDeps(Scop &S,
+                                        __isl_keep isl_union_map *Schedule,
+                                        __isl_keep isl_union_map *Dependences,
+                                        __isl_keep isl_space *ScheduleSpace) const;
 
   /// @brief The different basic kinds of dependences we calculate.
   isl_union_map *RAW;

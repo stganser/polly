@@ -25,6 +25,7 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/Support/GICHelper.h"
+#include "polly/Support/IslUtil.h"
 #include "llvm/Support/Debug.h"
 #include <isl/aff.h>
 #include <isl/ctx.h>
@@ -55,6 +56,13 @@ static cl::opt<bool>
     UseReductions("polly-dependences-use-reductions",
                   cl::desc("Exploit reductions in dependence analysis"),
                   cl::Hidden, cl::init(true), cl::ZeroOrMore,
+                  cl::cat(PollyCategory));
+
+static cl::opt<bool>
+    LegalityShowWitnesses("polly-legality-show-witnesses",
+                  cl::desc("Print data dependences that are violated by "
+                           "imported schedules."),
+                  cl::Hidden, cl::init(false), cl::ZeroOrMore,
                   cl::cat(PollyCategory));
 
 enum AnalysisType { VALUE_BASED_ANALYSIS, MEMORY_BASED_ANALYSIS };
@@ -508,6 +516,34 @@ void Dependences::calculateDependences(Scop &S) {
   DEBUG(dump());
 }
 
+void Dependences::printWitnessesForUnsatisfiedDeps(Scop &S,
+                                      __isl_keep isl_union_map *Schedule,
+                                      __isl_keep isl_union_map *Dependences,
+                                      __isl_keep isl_space *ScheduleSpace) const {
+  std::function<void(isl_map*)> lambda = [&Schedule, &ScheduleSpace, &S](isl_map *m) {
+    isl_union_map *uM = isl_union_map_from_map(isl_map_copy(m));
+    uM = isl_union_map_apply_domain(uM, isl_union_map_copy(Schedule));
+    uM = isl_union_map_apply_range(uM, isl_union_map_copy(Schedule));
+    isl_union_set *uDelta = isl_union_map_deltas(uM);
+    isl_set *delta = isl_union_set_extract_set(uDelta, isl_space_copy(ScheduleSpace));
+    isl_set *zero = isl_set_universe(isl_space_copy(ScheduleSpace));
+    isl_union_set_free(uDelta);
+    for (unsigned i = 0; i < isl_set_dim(zero, isl_dim_set); i++)
+      zero = isl_set_fix_si(zero, isl_dim_set, i, 0);
+    isl_map *nonPos = isl_set_lex_le_set(delta, zero);
+
+    if (!isl_map_is_empty(nonPos)) {
+      isl_printer *p = isl_printer_to_str(S.getIslCtx());
+      p = isl_printer_print_map(p, m);
+      errs() << "unsatisfied dependence: " << isl_printer_get_str(p) << '\n';
+      isl_printer_free(p);
+    }
+    isl_map_free(m);
+    isl_map_free(nonPos);
+  };
+  callLambda(Dependences, lambda);
+}
+
 bool Dependences::isValidSchedule(Scop &S,
                                   StatementToIslMapTy *NewSchedule) const {
   if (LegalityCheckDisabled)
@@ -533,22 +569,30 @@ bool Dependences::isValidSchedule(Scop &S,
     Schedule = isl_union_map_add_map(Schedule, StmtScat);
   }
 
+  isl_union_map *OriginalDependences = isl_union_map_copy(Dependences);
+
   Dependences =
       isl_union_map_apply_domain(Dependences, isl_union_map_copy(Schedule));
-  Dependences = isl_union_map_apply_range(Dependences, Schedule);
+  Dependences = isl_union_map_apply_range(Dependences, isl_union_map_copy(Schedule));
 
   isl_set *Zero = isl_set_universe(isl_space_copy(ScheduleSpace));
   for (unsigned i = 0; i < isl_set_dim(Zero, isl_dim_set); i++)
     Zero = isl_set_fix_si(Zero, isl_dim_set, i, 0);
 
   isl_union_set *UDeltas = isl_union_map_deltas(Dependences);
-  isl_set *Deltas = isl_union_set_extract_set(UDeltas, ScheduleSpace);
+  isl_set *Deltas = isl_union_set_extract_set(UDeltas, isl_space_copy(ScheduleSpace));
   isl_union_set_free(UDeltas);
 
   isl_map *NonPositive = isl_set_lex_le_set(Deltas, Zero);
   bool IsValid = isl_map_is_empty(NonPositive);
   isl_map_free(NonPositive);
 
+  if (!IsValid && LegalityShowWitnesses)
+    printWitnessesForUnsatisfiedDeps(S, Schedule, OriginalDependences, ScheduleSpace);
+
+  isl_union_map_free(Schedule);
+  isl_union_map_free(OriginalDependences);
+  isl_space_free(ScheduleSpace);
   return IsValid;
 }
 
