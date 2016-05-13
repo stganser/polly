@@ -580,7 +580,6 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   printer = isl_printer_flush(printer);
   printer = isl_printer_print_schedule(printer, Schedule);
   errs() << "New Schedule Tree:\n" << isl_printer_get_str(printer) << '\n';
-  isl_printer_free(printer);
 
   isl_schedule *NewSchedule = ScheduleTreeOptimizer::optimizeSchedule(Schedule);
   isl_union_map *NewScheduleMap = isl_schedule_get_map(NewSchedule);
@@ -590,6 +589,16 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
     isl_schedule_free(NewSchedule);
     return false;
   }
+
+  printer = isl_printer_flush(printer);
+  printer = isl_printer_print_union_map(printer, NewScheduleMap);
+  errs() << "New Optimized Schedule Map:\n" << isl_printer_get_str(printer) << '\n';
+
+  printer = isl_printer_flush(printer);
+  printer = isl_printer_print_schedule(printer, NewSchedule);
+  errs() << "New Optimized Schedule Tree:\n" << isl_printer_get_str(printer) << '\n';
+
+  isl_printer_free(printer);
 
   S.setScheduleTree(NewSchedule);
   S.markAsOptimized();
