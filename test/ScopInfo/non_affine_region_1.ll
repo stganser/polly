@@ -18,9 +18,6 @@
 ;      }
 ;    }
 ;
-; TODO: We build a complicated representation of Stmt_bb10__TO__bb18's domain that will also complicate the schedule.
-;       Once the domain is simple this test should fail and this TODO can be removed.
-
 ; CHECK:      Statements {
 ; CHECK-NEXT:     Stmt_bb3
 ; CHECK-NEXT:         Domain :=
@@ -41,21 +38,19 @@
 ; CHECK-NEXT:             [b] -> { Stmt_bb8[0] : b = 0 };
 ; CHECK-NEXT:         Schedule :=
 ; CHECK-NEXT:             [b] -> { Stmt_bb8[i0] -> [0, 0] };
-; CHECK-NEXT:         ReadAccess :=    [Reduction Type: NONE] [Scalar: 1]
-; CHECK-NEXT:             [b] -> { Stmt_bb8[i0] -> MemRef_b[] };
 ; CHECK-NEXT:         MustWriteAccess :=    [Reduction Type: NONE] [Scalar: 1]
 ; CHECK-NEXT:             [b] -> { Stmt_bb8[i0] -> MemRef_x_1__phi[] };
 ; CHECK-NEXT:     Stmt_bb10__TO__bb18
 ; CHECK-NEXT:         Domain :=
-; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] : 0 <= i0 <= 1023 and (i0 < b or (i0 >= b and 2i0 > b)); Stmt_bb10__TO__bb18[0] : b = 0 };
+; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] : 0 <= i0 <= 1023 };
 ; CHECK-NEXT:         Schedule :=
-; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] -> [i0, 3] : i0 < b or (i0 >= b and 2i0 > b); Stmt_bb10__TO__bb18[0] -> [0, 3] : b = 0 };
+; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] -> [i0, 3] }
 ; CHECK-NEXT:         ReadAccess :=    [Reduction Type: NONE] [Scalar: 1]
 ; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] -> MemRef_x_1__phi[] };
 ; CHECK-NEXT:         ReadAccess :=    [Reduction Type: NONE] [Scalar: 0]
-; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] -> MemRef_A[o0] : -2147483648 <= o0 <= 2147483645 };
+; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] -> MemRef_A[o0] : -2147483648 <= o0 <= 2147483647 };
 ; CHECK-NEXT:         MayWriteAccess :=    [Reduction Type: NONE] [Scalar: 0]
-; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] -> MemRef_A[o0] : -2147483648 <= o0 <= 2147483645 };
+; CHECK-NEXT:             [b] -> { Stmt_bb10__TO__bb18[i0] -> MemRef_A[o0] : -2147483648 <= o0 <= 2147483647 };
 ; CHECK-NEXT: }
 
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"

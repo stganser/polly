@@ -29,7 +29,7 @@ namespace llvm {
 class Pass;
 class Region;
 class ScalarEvolution;
-}
+} // namespace llvm
 
 namespace polly {
 using namespace llvm;
@@ -111,6 +111,17 @@ public:
   ///          GlobalMap.
   Value *getOrCreateScalarAlloca(Value *ScalarBase);
 
+  /// @brief Remove a Value's allocation from the ScalarMap.
+  ///
+  /// This function allows to remove values from the ScalarMap. This is useful
+  /// if the corresponding alloca instruction will be deleted (or moved into
+  /// another module), as without removing these values the underlying
+  /// AssertingVH will trigger due to us still keeping reference to this
+  /// scalar.
+  ///
+  /// @param ScalarBase The value to remove.
+  void freeScalarAlloc(Value *ScalarBase) { ScalarMap.erase(ScalarBase); }
+
   /// @brief Return the PHi-node alloca for @p ScalarBase
   ///
   /// If no alloca was mapped to @p ScalarBase a new one is created.
@@ -129,7 +140,7 @@ public:
   ///
   /// @returns The alloca for @p Access or a replacement value taken from
   ///          GlobalMap.
-  Value *getOrCreateAlloca(MemoryAccess &Access);
+  Value *getOrCreateAlloca(const MemoryAccess &Access);
 
   /// @brief Return the alloca for @p Array
   ///
@@ -151,7 +162,7 @@ public:
   void finalizeSCoP(Scop &S);
 
   /// @brief An empty destructor
-  virtual ~BlockGenerator(){};
+  virtual ~BlockGenerator() {}
 
   BlockGenerator(const BlockGenerator &) = default;
 
@@ -375,11 +386,9 @@ protected:
 
   /// @brief Handle users of @p Inst outside the SCoP.
   ///
-  /// @param R         The current SCoP region.
+  /// @param S         The current SCoP.
   /// @param Inst      The current instruction we check.
-  /// @param Address   If given it is used as the escape address for @p Inst.
-  void handleOutsideUsers(const Region &R, Instruction *Inst,
-                          Value *Address = nullptr);
+  void handleOutsideUsers(const Scop &S, Instruction *Inst);
 
   /// @brief Find scalar statements that have outside users.
   ///
@@ -417,7 +426,7 @@ protected:
   /// If a scalar value was used outside the SCoP we need to promote the value
   /// stored in the memory cell allocated for that scalar and combine it with
   /// the original value in the non-optimized SCoP.
-  void createScalarFinalization(Region &R);
+  void createScalarFinalization(Scop &S);
 
   /// @brief Try to synthesize a new value
   ///
@@ -473,11 +482,8 @@ protected:
   void copyInstScalar(ScopStmt &Stmt, Instruction *Inst, ValueMapT &BBMap,
                       LoopToScevMapT &LTS);
 
-  /// @brief Get the innermost loop that surrounds an instruction.
-  ///
-  /// @param Inst The instruction for which we get the loop.
-  /// @return The innermost loop that surrounds the instruction.
-  Loop *getLoopForInst(const Instruction *Inst);
+  /// @brief Get the innermost loop that surrounds the statement @p Stmt.
+  Loop *getLoopForStmt(const ScopStmt &Stmt) const;
 
   /// @brief Generate the operand address
   /// @param NewAccesses A map from memory access ids to new ast expressions,
@@ -505,12 +511,8 @@ protected:
   ///
   /// The implementation in the BlockGenerator is trivial, however it allows
   /// subclasses to handle PHIs different.
-  ///
-  /// @returns The nullptr as the BlockGenerator does not copy PHIs.
-  virtual Value *copyPHIInstruction(ScopStmt &, PHINode *, ValueMapT &,
-                                    LoopToScevMapT &) {
-    return nullptr;
-  }
+  virtual void copyPHIInstruction(ScopStmt &, PHINode *, ValueMapT &,
+                                  LoopToScevMapT &) {}
 
   /// @brief Copy a single Instruction.
   ///
@@ -730,7 +732,7 @@ public:
   /// @param BlockGen A generator for basic blocks.
   RegionGenerator(BlockGenerator &BlockGen) : BlockGenerator(BlockGen) {}
 
-  virtual ~RegionGenerator(){};
+  virtual ~RegionGenerator() {}
 
   /// @brief Copy the region statement @p Stmt.
   ///
@@ -827,11 +829,9 @@ private:
   /// @param BBMap     A mapping from old values to their new values
   ///                  (for values recalculated within this basic block).
   /// @param LTS       A map from old loops to new induction variables as SCEVs.
-  ///
-  /// @returns The copied instruction or nullptr if no copy was made.
-  virtual Value *copyPHIInstruction(ScopStmt &Stmt, PHINode *Inst,
-                                    ValueMapT &BBMap,
-                                    LoopToScevMapT &LTS) override;
+  virtual void copyPHIInstruction(ScopStmt &Stmt, PHINode *Inst,
+                                  ValueMapT &BBMap,
+                                  LoopToScevMapT &LTS) override;
 };
-}
+} // namespace polly
 #endif

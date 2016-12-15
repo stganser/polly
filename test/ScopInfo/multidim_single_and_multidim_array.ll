@@ -1,7 +1,11 @@
 ; RUN: opt %loadPolly -polly-scops -polly-delinearize=false -analyze < %s | FileCheck %s
 ; RUN: opt %loadPolly -polly-scops -polly-delinearize=false -polly-allow-nonaffine -analyze < %s | FileCheck %s --check-prefix=NONAFFINE
-; RUN: opt %loadPolly -polly-scops -polly-delinearize -analyze < %s | FileCheck %s --check-prefix=DELIN
-; RUN: opt %loadPolly -polly-scops -polly-delinearize -polly-allow-nonaffine -analyze < %s | FileCheck %s --check-prefix=DELIN
+; RUN: opt %loadPolly -polly-scops -analyze < %s | FileCheck %s --check-prefix=DELIN
+; RUN: opt %loadPolly -polly-scops -polly-allow-nonaffine -analyze < %s | FileCheck %s --check-prefix=DELIN
+; RUN: opt %loadPolly -polly-function-scops -polly-delinearize=false -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-function-scops -polly-delinearize=false -polly-allow-nonaffine -analyze < %s | FileCheck %s --check-prefix=NONAFFINE
+; RUN: opt %loadPolly -polly-function-scops -analyze < %s | FileCheck %s --check-prefix=DELIN
+; RUN: opt %loadPolly -polly-function-scops -polly-allow-nonaffine -analyze < %s | FileCheck %s --check-prefix=DELIN
 
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 
@@ -29,7 +33,7 @@ target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 ; NONAFFINE-NEXT:         Schedule :=
 ; NONAFFINE-NEXT:             [n, p_1] -> { Stmt_for_i_1[i0] -> [0, i0] };
 ; NONAFFINE-NEXT:         MayWriteAccess :=    [Reduction Type: NONE] [Scalar: 0]
-; NONAFFINE-NEXT:             [n, p_1] -> { Stmt_for_i_1[i0] -> MemRef_X[o0] : -2305843009213693952 <= o0 <= 2305843009213693949 };
+; NONAFFINE-NEXT:             [n, p_1] -> { Stmt_for_i_1[i0] -> MemRef_X[o0] : -2305843009213693952 <= o0 <= 2305843009213693951 };
 ; NONAFFINE-NEXT:     Stmt_for_i_2
 ; NONAFFINE-NEXT:         Domain :=
 ; NONAFFINE-NEXT:             [n, p_1] -> { Stmt_for_i_2[i0] : 0 <= i0 < n };

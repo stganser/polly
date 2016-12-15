@@ -123,11 +123,11 @@ struct JSONImporter : public ScopPass {
   static __isl_give isl_schedule *rebuildSchedule(
       __isl_take isl_schedule *sched, Scop &S);
 };
-}
+} // namespace
 
 char JSONExporter::ID = 0;
 std::string JSONExporter::getFileName(Scop &S) const {
-  std::string FunctionName = S.getRegion().getEntry()->getParent()->getName();
+  std::string FunctionName = S.getFunction().getName();
   std::string FileName = FunctionName + "___" + S.getNameStr() + ".jscop";
   return FileName;
 }
@@ -145,7 +145,7 @@ Json::Value JSONExporter::getJSON(Scop &S) const {
     Location = FileName + ":" + std::to_string(LineBegin) + "-" +
                std::to_string(LineEnd);
 
-  root["name"] = S.getRegion().getNameStr();
+  root["name"] = S.getNameStr();
   root["context"] = S.getContextStr();
   if (LineBegin != (unsigned)-1)
     root["location"] = Location;
@@ -175,8 +175,6 @@ Json::Value JSONExporter::getJSON(Scop &S) const {
 }
 
 bool JSONExporter::runOnScop(Scop &S) {
-  Region &R = S.getRegion();
-
   std::string FileName = ImportDir + "/" + getFileName(S);
 
   Json::Value jscop = getJSON(S);
@@ -187,8 +185,8 @@ bool JSONExporter::runOnScop(Scop &S) {
   std::error_code EC;
   tool_output_file F(FileName, EC, llvm::sys::fs::F_Text);
 
-  std::string FunctionName = R.getEntry()->getParent()->getName();
-  errs() << "Writing JScop '" << R.getNameStr() << "' in function '"
+  std::string FunctionName = S.getFunction().getName();
+  errs() << "Writing JScop '" << S.getNameStr() << "' in function '"
          << FunctionName << "' to '" << FileName << "'.\n";
 
   if (!EC) {
@@ -209,14 +207,14 @@ bool JSONExporter::runOnScop(Scop &S) {
 
 void JSONExporter::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
-  AU.addRequired<ScopInfo>();
+  AU.addRequired<ScopInfoRegionPass>();
 }
 
 Pass *polly::createJSONExporterPass() { return new JSONExporter(); }
 
 char JSONImporter::ID = 0;
 std::string JSONImporter::getFileName(Scop &S) const {
-  std::string FunctionName = S.getRegion().getEntry()->getParent()->getName();
+  std::string FunctionName = S.getFunction().getName();
   std::string FileName = FunctionName + "___" + S.getNameStr() + ".jscop";
 
   if (ImportPostfix != "")
@@ -424,15 +422,14 @@ __isl_give isl_schedule *JSONImporter::rebuildSchedule(
 }
 
 bool JSONImporter::runOnScop(Scop &S) {
-  Region &R = S.getRegion();
-  const Dependences &D = getAnalysis<DependenceInfo>().getDependences();
-  const DataLayout &DL =
-      S.getRegion().getEntry()->getParent()->getParent()->getDataLayout();
+  const Dependences &D =
+      getAnalysis<DependenceInfo>().getDependences(Dependences::AL_Statement);
+  const DataLayout &DL = S.getFunction().getParent()->getDataLayout();
 
   std::string FileName = ImportDir + "/" + getFileName(S);
 
-  std::string FunctionName = R.getEntry()->getParent()->getName();
-  errs() << "Reading JScop '" << R.getNameStr() << "' in function '"
+  std::string FunctionName = S.getFunction().getName();
+  errs() << "Reading JScop '" << S.getNameStr() << "' in function '"
          << FunctionName << "' from '" << FileName << "'.\n";
   ErrorOr<std::unique_ptr<MemoryBuffer>> result =
       MemoryBuffer::getFile(FileName);
