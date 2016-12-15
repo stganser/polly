@@ -43,7 +43,6 @@ add_polly_library(Polly
   CodeGen/CodegenCleanup.cpp
   ${GPGPU_CODEGEN_FILES}
   Exchange/JSONExporter.cpp
-  Exchange/LetseeExporter.cpp
   Support/GICHelper.cpp
   Support/SCEVAffinator.cpp
   Support/SCEVValidator.cpp
