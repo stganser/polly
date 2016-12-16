@@ -519,7 +519,9 @@ bool JSONImporter::runOnScop(Scop &S) {
 
   if (LoadScheduleTree) {
     scheduleTree = rebuildSchedule(scheduleTree, S);
-    scheduleTree = ScheduleTreeOptimizer::optimizeSchedule(scheduleTree);
+    Function &F = S.getFunction();
+    auto *TTI = &getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
+    scheduleTree = ScheduleTreeOptimizer::optimizeSchedule(scheduleTree, TTI);
     S.setScheduleTree(scheduleTree);
     S.markAsOptimized();
     for (ScopStmt &Stmt : S) {
@@ -658,6 +660,7 @@ bool JSONImporter::runOnScop(Scop &S) {
 void JSONImporter::getAnalysisUsage(AnalysisUsage &AU) const {
   ScopPass::getAnalysisUsage(AU);
   AU.addRequired<DependenceInfo>();
+  AU.addRequired<TargetTransformInfoWrapperPass>();
 }
 
 Pass *polly::createJSONImporterPass() { return new JSONImporter(); }
@@ -677,6 +680,8 @@ INITIALIZE_PASS_BEGIN(JSONImporter, "polly-import-jscop",
                       " (Reads a .jscop file for each Scop)",
                       false, false);
 INITIALIZE_PASS_DEPENDENCY(DependenceInfo)
+INITIALIZE_PASS_DEPENDENCY(ScopInfoRegionPass);
+INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
 INITIALIZE_PASS_END(JSONImporter, "polly-import-jscop",
                     "Polly - Import Scops from JSON"
                     " (Reads a .jscop file for each Scop)",
