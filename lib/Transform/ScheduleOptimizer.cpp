@@ -751,8 +751,18 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   Function &F = S.getFunction();
   auto *TTI = &getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
-  isl_schedule *NewSchedule =
-      ScheduleTreeOptimizer::optimizeSchedule(Schedule, TTI);
+
+  isl_printer *printer = isl_printer_to_str(S.getIslCtx());
+  isl_union_map *schedMap = isl_schedule_get_map(Schedule);
+  printer = isl_printer_print_union_map(printer, schedMap);
+  errs() << "New Schedule Map:\n" << isl_printer_get_str(printer) << '\n';
+  isl_union_map_free(schedMap);
+
+  printer = isl_printer_flush(printer);
+  printer = isl_printer_print_schedule(printer, Schedule);
+  errs() << "New Schedule Tree:\n" << isl_printer_get_str(printer) << '\n';
+
+  isl_schedule *NewSchedule = ScheduleTreeOptimizer::optimizeSchedule(Schedule, TTI);
   isl_union_map *NewScheduleMap = isl_schedule_get_map(NewSchedule);
 
   if (!ScheduleTreeOptimizer::isProfitableSchedule(S, NewScheduleMap)) {

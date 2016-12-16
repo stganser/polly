@@ -35,7 +35,6 @@ llvm::Pass *createDOTOnlyViewerPass();
 llvm::Pass *createDOTPrinterPass();
 llvm::Pass *createDOTViewerPass();
 llvm::Pass *createJSONExporterPass();
-llvm::Pass *createLetseeExporterPass();
 llvm::Pass *createJSONImporterPass();
 llvm::Pass *createPollyCanonicalizePass();
 llvm::Pass *createScopDetectionPass();
@@ -69,7 +68,6 @@ struct PollyForcePassLinking {
     polly::createDOTPrinterPass();
     polly::createDOTViewerPass();
     polly::createJSONExporterPass();
-    polly::createLetseeExporterPass();
     polly::createJSONImporterPass();
     polly::createScopDetectionPass();
     polly::createScopInfoRegionPassPass();
