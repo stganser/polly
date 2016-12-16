@@ -87,7 +87,6 @@ class PassRegistry;
 void initializeCodePreparationPass(llvm::PassRegistry &);
 void initializeDeadCodeElimPass(llvm::PassRegistry &);
 void initializeJSONExporterPass(llvm::PassRegistry &);
-void initializeLetseeExporterPass(llvm::PassRegistry &);
 void initializeJSONImporterPass(llvm::PassRegistry &);
 void initializeIslAstInfoPass(llvm::PassRegistry &);
 void initializeCodeGenerationPass(llvm::PassRegistry &);
