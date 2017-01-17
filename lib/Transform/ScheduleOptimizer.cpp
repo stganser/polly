@@ -120,6 +120,12 @@ static cl::opt<bool> FirstLevelTiling("polly-tiling",
                                       cl::init(true), cl::ZeroOrMore,
                                       cl::cat(PollyCategory));
 
+static cl::opt<bool> FirstLevelTilingPermitInnerSeq(
+    "polly-tiling-permit-inner-seq", cl::desc("Allow tiling of the innermost "
+                                  "band node if its child is a sequence node."),
+                                      cl::init(false), cl::ZeroOrMore,
+                                      cl::cat(PollyCategory));
+
 static cl::opt<int> LatencyVectorFma(
     "polly-target-latency-vector-fma",
     cl::desc("The minimal number of cycles between issuing two "
@@ -361,6 +367,28 @@ ScheduleTreeOptimizer::applyRegisterTiling(__isl_take isl_schedule_node *Node,
   return Node;
 }
 
+bool ScheduleTreeOptimizer::isSeqNodeWithLeafChildren(
+    __isl_keep isl_schedule_node *Node) {
+  if (isl_schedule_node_get_type(Node) != isl_schedule_node_sequence)
+    return false;
+
+  for (int i = 0; i < isl_schedule_node_n_children(Node); ++i) {
+    isl_schedule_node *Child = isl_schedule_node_get_child(Node, i);
+    isl_schedule_node *ChildOfChild = isl_schedule_node_get_child(Child, 0);
+    bool ChildOfChildIsLeaf
+        = isl_schedule_node_get_type(ChildOfChild) == isl_schedule_node_leaf;
+    isl_schedule_node_free(Child);
+    isl_schedule_node_free(ChildOfChild);
+    if (!ChildOfChildIsLeaf)
+      return false;
+  }
+  return true;
+}
+
+bool ScheduleTreeOptimizer::isLeafNode(__isl_keep isl_schedule_node *Node) {
+  return isl_schedule_node_get_type(Node) == isl_schedule_node_leaf;
+}
+
 bool ScheduleTreeOptimizer::isTileableBandNode(
     __isl_keep isl_schedule_node *Node) {
   if (isl_schedule_node_get_type(Node) != isl_schedule_node_band)
@@ -380,13 +408,11 @@ bool ScheduleTreeOptimizer::isTileableBandNode(
     return false;
 
   auto Child = isl_schedule_node_get_child(Node, 0);
-  auto Type = isl_schedule_node_get_type(Child);
+  bool tilable = isLeafNode(Child)
+      || (FirstLevelTilingPermitInnerSeq && isSeqNodeWithLeafChildren(Child));
   isl_schedule_node_free(Child);
 
-  if (Type != isl_schedule_node_leaf)
-    return false;
-
-  return true;
+  return tilable;
 }
 
 __isl_give isl_schedule_node *

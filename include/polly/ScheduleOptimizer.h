@@ -144,6 +144,17 @@ private:
   /// @param Node The node to check.
   static bool isTileableBandNode(__isl_keep isl_schedule_node *Node);
 
+  /// @brief Check if this node is a sequence node and if all of its children
+  /// are leaf nodes.
+  ///
+  /// @param Node The node to check.
+  static bool isSeqNodeWithLeafChildren(__isl_keep isl_schedule_node *Node);
+
+  /// @brief Check if this node is a leaf node.
+  ///
+  /// @param Node The node to check.
+  static bool isLeafNode(__isl_keep isl_schedule_node *Node);
+
   /// @brief Pre-vectorizes one scheduling dimension of a schedule band.
   ///
   /// prevectSchedBand splits out the dimension DimToVectorize, tiles it and
