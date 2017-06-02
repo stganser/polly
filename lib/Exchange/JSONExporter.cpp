@@ -250,9 +250,9 @@ __isl_give isl_union_set *JSONImporter::buildDomainForSttmnts(
       = isl_union_set_empty(isl_union_set_get_space(domain));
   isl_union_set_free(domain);
   for (const char* stmtName : stmtNames) {
-    for (ScopStmt &S : S) {
-      if (!std::strcmp(stmtName, S.getBaseName())) {
-        result = isl_union_set_add_set(result, S.getDomain());
+    for (ScopStmt &stmt : S) {
+      if (!std::strcmp(stmtName, stmt.getBaseName())) {
+        result = isl_union_set_add_set(result, stmt.getDomain());
       }
     }
   }
