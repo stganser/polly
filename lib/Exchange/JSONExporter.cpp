@@ -291,14 +291,13 @@ __isl_give isl_union_map *JSONImporter::replaceIdsInUnionMap(
 
 __isl_give isl_schedule *JSONImporter::setCoincidence(
     __isl_take isl_schedule *sched, __isl_keep isl_schedule_node *oldNode) {
-  isl_schedule_node *root = isl_schedule_get_root(sched);
   std::function<isl_schedule_node*(isl_schedule_node*)> lambda
-      = [&root, &oldNode](isl_schedule_node *n) {
+      = [&oldNode](isl_schedule_node *n) {
     isl_schedule_node *res = n;
     if (isl_schedule_node_has_parent(n)) {
       isl_schedule_node *parent = isl_schedule_node_parent(
             isl_schedule_node_copy(n));
-      if (isl_schedule_node_is_equal(root, parent)) {
+      if (isl_schedule_node_get_type(parent) == isl_schedule_node_type::isl_schedule_node_domain) {
         for (unsigned i = 0; i < isl_schedule_node_band_n_member(res); ++i) {
           int coincidence = isl_schedule_node_band_member_get_coincident(
                 oldNode, i);
@@ -311,21 +310,19 @@ __isl_give isl_schedule *JSONImporter::setCoincidence(
     return res;
   };
   isl_schedule *result = callLambda(sched, lambda);
-  isl_schedule_node_free(root);
   return result;
 }
 
 __isl_give isl_schedule *JSONImporter::setPermutability(
     __isl_take isl_schedule *sched, __isl_keep isl_schedule_node *oldNode) {
-  isl_schedule_node *root = isl_schedule_get_root(sched);
   std::function<isl_schedule_node*(isl_schedule_node*)> lambda
-      = [&root, &oldNode](isl_schedule_node *n) {
+      = [&oldNode](isl_schedule_node *n) {
     isl_schedule_node *res = n;
     if (isl_schedule_node_get_type(n) == isl_schedule_node_band
         && isl_schedule_node_has_parent(n)) {
       isl_schedule_node *parent = isl_schedule_node_parent(
             isl_schedule_node_copy(n));
-      if (isl_schedule_node_is_equal(root, parent)) {
+      if (isl_schedule_node_get_type(parent) == isl_schedule_node_type::isl_schedule_node_domain) {
         res = isl_schedule_node_band_set_permutable(n,
                                 isl_schedule_node_band_get_permutable(oldNode));
       }
@@ -333,7 +330,6 @@ __isl_give isl_schedule *JSONImporter::setPermutability(
     }
     return res;
   };
-  isl_schedule_node_free(root);
   isl_schedule *result = callLambda(sched, lambda);
   return result;
 }
