@@ -57,7 +57,6 @@ Value *polly::createLoop(Value *LB, Value *UB, Value *Stride,
                          bool UseGuard) {
   Function *F = Builder.GetInsertBlock()->getParent();
   LLVMContext &Context = F->getContext();
-
   assert(LB->getType() == UB->getType() && "Types of loop bounds do not match");
   IntegerType *LoopIVType = dyn_cast<IntegerType>(UB->getType());
   assert(LoopIVType && "UB is not integer?");

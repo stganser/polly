@@ -14,6 +14,7 @@
 #include <string>
 #include <system_error>
 #include "llvm/ADT/DenseSet.h"
+#include <functional>
 
 namespace polly {
 
