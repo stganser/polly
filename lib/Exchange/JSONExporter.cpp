@@ -27,6 +27,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_os_ostream.h"
 #include "isl/constraint.h"
 #include "isl/map.h"
 #include "isl/union_map.h"
@@ -183,24 +184,24 @@ bool JSONExporter::runOnScop(Scop &S) {
 
   // Write to file.
   std::error_code EC;
-  tool_output_file F(FileName, EC, llvm::sys::fs::F_Text);
+  raw_fd_ostream F(FileName, EC, sys::fs::F_Text);
 
   std::string FunctionName = S.getFunction().getName();
   errs() << "Writing JScop '" << S.getNameStr() << "' in function '"
          << FunctionName << "' to '" << FileName << "'.\n";
 
   if (!EC) {
-    F.os() << fileContent;
-    F.os().close();
-    if (!F.os().has_error()) {
+    F << fileContent;
+    F.close();
+    if (!F.has_error()) {
       errs() << "\n";
-      F.keep();
+//      F.keep();
       return false;
     }
   }
 
   errs() << "  error opening file for writing!\n";
-  F.os().clear_error();
+  F.clear_error();
 
   return false;
 }
